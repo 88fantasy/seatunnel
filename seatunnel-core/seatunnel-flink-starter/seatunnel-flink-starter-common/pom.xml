@@ -80,6 +80,17 @@
             <version>${project.version}</version>
         </dependency>
 
+        <!--
+            The backend implementation is required at runtime, not just the contract: the reporter
+            resolves it through the LineageBackend service loader, so without this dependency the
+            starter jar carries no provider file and lineage silently reports nothing.
+        -->
+        <dependency>
+            <groupId>org.apache.seatunnel</groupId>
+            <artifactId>seatunnel-lineage-openlineage</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.apache.seatunnel</groupId>
             <artifactId>connector-console</artifactId>
