@@ -168,4 +168,42 @@ class FlinkLineageSupportTest {
         Assertions.assertDoesNotThrow(
                 () -> hookType.getMethod("onCanceled", JobID.class).invoke(hook, new JobID()));
     }
+
+    /**
+     * Reproduces the exception chain a real detached submission produces when the hook class is not
+     * on the JobManager. Flink surfaces only a bare ClassNotFoundException from
+     * JobSubmitHandler.loadJobGraph, which names the class but never mentions lineage or the fix.
+     */
+    @Test
+    void explainsAJobManagerThatCannotLoadTheStatusHook() {
+        String hookClass = FlinkLineageSupport.class.getName() + "$JobStatusHookInvocationHandler";
+        Exception submissionFailure =
+                new RuntimeException(
+                        "Failed to submit JobGraph.",
+                        new RuntimeException(
+                                "Failed to deserialize JobGraph.",
+                                new ClassNotFoundException(hookClass)));
+
+        String hint = FlinkLineageSupport.describeMissingHookClass(submissionFailure);
+
+        Assertions.assertNotNull(hint);
+        Assertions.assertTrue(hint.contains("$FLINK_HOME/lib"), "must say where to install it");
+        Assertions.assertTrue(
+                hint.contains("openlineage_enabled=false"),
+                "must offer a way to submit without it");
+        Assertions.assertTrue(hint.contains(hookClass), "must name the class Flink could not load");
+    }
+
+    @Test
+    void leavesUnrelatedSubmissionFailuresUntouched() {
+        Assertions.assertNull(
+                FlinkLineageSupport.describeMissingHookClass(
+                        new RuntimeException(
+                                "Failed to submit JobGraph.",
+                                new ClassNotFoundException("com.example.SomeConnector"))));
+        Assertions.assertNull(
+                FlinkLineageSupport.describeMissingHookClass(
+                        new IllegalStateException("Recovery is suppressed")));
+        Assertions.assertNull(FlinkLineageSupport.describeMissingHookClass(null));
+    }
 }

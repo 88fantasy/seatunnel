@@ -178,7 +178,13 @@ still emitted.
    Checkpoint heartbeats do not extend the receiver's second, seven-day absolute lifetime limit for
    an uncompleted run. A continuously running run can still be marked `ABANDONED` after seven days;
    a later terminal event can replace that inferred state.
-5. The Flink lineage contract and backend JARs must be installed in the cluster `lib/` directory.
+5. The Flink lineage JARs must be installed in the JobManager's `lib/` directory, and **a job with
+   lineage enabled fails to submit if they are not**. The status hook is a structural field of the
+   JobGraph, so the JobManager deserializes it with the system class loader before any user class
+   loader exists; shipping the classes in the submitted job jar does not help. This is deliberate —
+   a job that silently loses its lineage is worse than one that refuses to start — and the
+   submission error names the missing class and how to resolve it. To submit without installing
+   them, set `openlineage_enabled=false`.
    Flink 1.20+ uses `config.yaml`, while legacy deployments use `flink-conf.yaml`; configure the
    `openlineage.` values in the file layout used by each deployment. If both layouts are maintained,
    keep the corresponding configuration in both files.

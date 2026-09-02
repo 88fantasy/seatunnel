@@ -162,9 +162,13 @@ Paimon 数据集。Doris 的 `fenodes` 通常是 HTTP Stream Load
    abandoned-run 超时约束。即使开启 checkpoint 心跳，也不能延长接收端对未完成 run 的第二层
    7 天绝对寿命上限；持续上报但永不终止的 run 仍可能在 7 天后被标记为 `ABANDONED`，之后
    到达的终态事件可以覆盖这一推断状态。
-5. Flink 血缘 contract 和 backend JAR 必须安装到集群 `lib/` 目录。Flink 1.20+ 使用
-   `config.yaml`，legacy 部署使用 `flink-conf.yaml`；应在每种部署实际使用的配置文件中设置
-   `openlineage.` 配置。如果同时维护两种布局，应在两个文件中保持对应配置一致。
+5. Flink 血缘 JAR 必须安装到 JobManager 的 `lib/` 目录，**未安装时开启血缘的作业会提交失败**。
+   状态 hook 是 JobGraph 的结构性字段，JobManager 在建立 user class loader 之前就用 system
+   class loader 反序列化它，因此把类打进提交的作业 JAR 中不起作用。这是刻意的设计——静默丢失
+   血缘比拒绝启动更糟——提交错误会指出缺失的类以及解决办法。若要在未安装的情况下提交作业，
+   请设置 `openlineage_enabled=false`。
+   Flink 1.20+ 使用 `config.yaml`，legacy 部署使用 `flink-conf.yaml`；应在每种部署实际使用的
+   配置文件中设置 `openlineage.` 配置。如果同时维护两种布局，应在两个文件中保持对应配置一致。
 
 血缘投递在引擎边界始终是 best-effort。接收端或网络失败会被捕获并记录 warning，不影响数据
 处理作业，且没有任何配置项可以改变这一点。

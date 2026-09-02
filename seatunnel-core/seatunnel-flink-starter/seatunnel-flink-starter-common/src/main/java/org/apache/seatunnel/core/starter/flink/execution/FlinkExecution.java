@@ -203,6 +203,10 @@ public class FlinkExecution implements TaskExecution {
 
             LOGGER.info("Job finished, execution result: \n{}", jobMetricsSummary);
         } catch (Exception e) {
+            String lineageDeploymentHint = FlinkLineageSupport.describeMissingHookClass(e);
+            if (lineageDeploymentHint != null) {
+                throw new TaskExecuteException(lineageDeploymentHint, e);
+            }
             throw new TaskExecuteException("Execute Flink job error", e);
         }
     }

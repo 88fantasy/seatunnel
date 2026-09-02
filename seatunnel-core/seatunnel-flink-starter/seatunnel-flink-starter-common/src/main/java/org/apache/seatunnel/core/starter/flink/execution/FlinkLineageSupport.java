@@ -55,6 +55,10 @@ public final class FlinkLineageSupport {
     private static final Logger LOGGER = LoggerFactory.getLogger(FlinkLineageSupport.class);
     private static final String JOB_STATUS_HOOK = "org.apache.flink.core.execution.JobStatusHook";
 
+    /** The hook implementation the JobManager must be able to load; see {@link #register}. */
+    private static final String HOOK_HANDLER_CLASS =
+            FlinkLineageSupport.class.getName() + "$JobStatusHookInvocationHandler";
+
     /** Run-facet property carrying the Flink job identifier shown in the Flink UI and REST API. */
     private static final String FLINK_JOB_ID_PROPERTY = "flink_job_id";
 
@@ -155,6 +159,12 @@ public final class FlinkLineageSupport {
                             new Class<?>[] {hookType},
                             new JobStatusHookInvocationHandler(config.withAuthToken(null), events));
             registerHook.invoke(streamGraph, hook);
+            // Stated before submission because the JobManager-side failure that follows a missing
+            // deployment is a bare ClassNotFoundException that never mentions lineage.
+            LOGGER.info(
+                    "Registered the lineage job status hook; the JobManager must be able to load {}"
+                            + " from $FLINK_HOME/lib, otherwise job submission fails",
+                    HOOK_HANDLER_CLASS);
             try {
                 environment.registerJobListener(
                         (JobListener)
@@ -215,6 +225,45 @@ public final class FlinkLineageSupport {
             }
         } catch (Throwable error) {
             LOGGER.debug("Flink status-hook API is unavailable", error);
+        }
+        return null;
+    }
+
+    /**
+     * Explains a job submission that failed because the status hook is missing on the JobManager.
+     *
+     * <p>The hook is a structural field of the JobGraph, not user code, so the JobManager
+     * deserializes it with the system class loader before any user class loader exists. Shipping
+     * the class in the submitted job jar is therefore not enough, and Flink reports only a bare
+     * {@code ClassNotFoundException} from {@code JobSubmitHandler.loadJobGraph}, which does not say
+     * that lineage caused it or how to fix it.
+     *
+     * <p>Failing the submission is intended: a job that silently loses its lineage is worse than
+     * one that refuses to start. This only makes the reason actionable.
+     *
+     * @param failure the exception thrown by job submission
+     * @return an explanatory message, or {@code null} when the failure is unrelated to lineage
+     */
+    public static String describeMissingHookClass(Throwable failure) {
+        for (Throwable current = failure;
+                current != null && current != current.getCause();
+                current = current.getCause()) {
+            String message = current.getMessage();
+            if (message == null || !message.contains(HOOK_HANDLER_CLASS)) {
+                continue;
+            }
+            if (!(current instanceof ClassNotFoundException)
+                    && !(current instanceof NoClassDefFoundError)) {
+                continue;
+            }
+            return "Execute Flink job error: lineage reporting is enabled, but the JobManager"
+                    + " cannot load "
+                    + HOOK_HANDLER_CLASS
+                    + ". The job status hook is part of the JobGraph and is deserialized by the"
+                    + " JobManager before the user class loader exists, so shipping it in the"
+                    + " submitted jar is not enough. Install the SeaTunnel lineage jar in"
+                    + " $FLINK_HOME/lib on the JobManager and restart it, or set"
+                    + " openlineage_enabled=false to submit without lineage.";
         }
         return null;
     }
