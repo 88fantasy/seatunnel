@@ -67,6 +67,11 @@ public final class ZetaLineageReporter {
     /**
      * Reports a Zeta job lifecycle event when the job enters a lineage-relevant state.
      *
+     * <p>The events are built on the calling thread so that they describe the job as it was at the
+     * transition, but they are sent through {@link JobMaster#submitLineageEmission(Runnable)}: this
+     * method runs inside {@code PhysicalPlan.updateJobState}, which holds the plan monitor, and a
+     * blocking send would hold it for the lifetime of the HTTP request.
+     *
      * @param jobMaster job master that owns the logical DAG and job configuration
      * @param status current job status
      */
@@ -80,11 +85,20 @@ public final class ZetaLineageReporter {
         }
         LineageEventType eventType = eventType(status);
         boolean includeStatistics = eventType == LineageEventType.COMPLETE;
-        emit(config, events(jobMaster, config, eventType, includeStatistics), eventType);
+        List<LineageEvent> events = events(jobMaster, config, eventType, includeStatistics);
+        if (events.isEmpty()) {
+            return;
+        }
+        jobMaster.submitLineageEmission(() -> emit(config, events, eventType));
     }
 
     /**
      * Reports a throttled lineage heartbeat after a completed streaming checkpoint.
+     *
+     * <p>Everything past the throttle runs off the calling thread. The caller is the checkpoint
+     * coordinator finishing a checkpoint, and both halves of the work block: collecting the current
+     * metrics issues an RPC to every worker, and sending performs an HTTP request. Doing either on
+     * the coordinator thread lets an unreachable lineage receiver stall checkpointing.
      *
      * @param jobMaster job master that owns the pipeline
      * @param pipelineId completed checkpoint pipeline identifier
@@ -102,10 +116,17 @@ public final class ZetaLineageReporter {
             if (!shouldReportHeartbeat(jobMaster, pipelineId, config.heartbeatMinIntervalMs())) {
                 return;
             }
-            emit(
-                    config,
-                    events(jobMaster, config, LineageEventType.RUNNING, true),
-                    LineageEventType.RUNNING);
+            jobMaster.submitLineageEmission(
+                    () -> {
+                        try {
+                            emit(
+                                    config,
+                                    events(jobMaster, config, LineageEventType.RUNNING, true),
+                                    LineageEventType.RUNNING);
+                        } catch (Throwable error) {
+                            LOGGER.warning("Failed to emit Zeta lineage heartbeat", error);
+                        }
+                    });
         } catch (Throwable error) {
             LOGGER.warning("Failed to emit Zeta lineage heartbeat", error);
         }

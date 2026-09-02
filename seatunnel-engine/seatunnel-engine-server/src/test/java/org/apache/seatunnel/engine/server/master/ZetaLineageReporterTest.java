@@ -38,12 +38,19 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
@@ -154,6 +161,59 @@ class ZetaLineageReporterTest {
 
         Assertions.assertTrue(invokeShouldReportHeartbeat(jobMaster, 1, Long.MAX_VALUE));
         Assertions.assertFalse(invokeShouldReportHeartbeat(jobMaster, 2, Long.MAX_VALUE));
+    }
+
+    /**
+     * Emission blocks on an HTTP request whose worst case is the configured timeout times one more
+     * than the retry count. Its callers hold a completed checkpoint and the physical plan monitor,
+     * so the send has to leave the calling thread; it must still reach the receiver in submission
+     * order, because a COMPLETE that overtakes its own START leaves the run in the wrong state.
+     */
+    @Test
+    void shouldRunLineageEmissionsOffTheCallerThreadInSubmissionOrder() throws Exception {
+        JobMaster jobMaster = mock(JobMaster.class, CALLS_REAL_METHODS);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        setField(jobMaster, "executorService", executor);
+        setField(jobMaster, "lineageEmissions", new ArrayDeque<Runnable>());
+        setField(jobMaster, "lineageEmissionLock", new Object());
+        try {
+            List<String> emitted = Collections.synchronizedList(new ArrayList<>());
+            CountDownLatch releaseFirst = new CountDownLatch(1);
+            CountDownLatch lastEmitted = new CountDownLatch(1);
+
+            jobMaster.submitLineageEmission(
+                    () -> {
+                        awaitQuietly(releaseFirst);
+                        emitted.add("first");
+                    });
+            // A failing emission must not break the chain for the events queued behind it.
+            jobMaster.submitLineageEmission(
+                    () -> {
+                        throw new IllegalStateException("receiver rejected the event");
+                    });
+            jobMaster.submitLineageEmission(
+                    () -> {
+                        emitted.add("third");
+                        lastEmitted.countDown();
+                    });
+
+            Assertions.assertTrue(
+                    emitted.isEmpty(), "the calling thread must not run the emission itself");
+            releaseFirst.countDown();
+            Assertions.assertTrue(
+                    lastEmitted.await(30, TimeUnit.SECONDS), "queued emissions must still run");
+            Assertions.assertEquals(Arrays.asList("first", "third"), emitted);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private static void awaitQuietly(CountDownLatch latch) {
+        try {
+            latch.await(30, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**

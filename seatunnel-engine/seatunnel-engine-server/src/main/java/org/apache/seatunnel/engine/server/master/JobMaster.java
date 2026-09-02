@@ -103,9 +103,11 @@ import lombok.Getter;
 import lombok.NonNull;
 
 import java.net.URL;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -119,6 +121,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
@@ -183,6 +186,14 @@ public class JobMaster {
     private final Map<Integer, List<SlotProfile>> releasedSlotWhenTaskGroupFinished;
 
     private final Map<Integer, AtomicLong> lineageHeartbeatTimes = new ConcurrentHashMap<>();
+
+    /** Lineage emissions waiting to be sent; see {@link #submitLineageEmission(Runnable)}. */
+    private final Deque<Runnable> lineageEmissions = new ArrayDeque<>();
+
+    private final Object lineageEmissionLock = new Object();
+
+    /** Whether a drain task is already running. Guarded by {@code lineageEmissionLock}. */
+    private boolean drainingLineageEmissions;
 
     private final IMap<Long, JobInfo> runningJobInfoIMap;
 
@@ -1105,6 +1116,70 @@ public class JobMaster {
 
     Map<Integer, AtomicLong> getLineageHeartbeatTimes() {
         return lineageHeartbeatTimes;
+    }
+
+    /**
+     * Runs a lineage emission off the calling thread.
+     *
+     * <p>Emission performs a blocking HTTP request whose worst case is {@code timeoutMs} times one
+     * more than {@code retryTimes}. Its two call sites are a completed checkpoint and a job state
+     * transition, both of which hold engine state that must not wait on an unreachable lineage
+     * receiver, so the send is handed to the coordinator executor instead.
+     *
+     * <p>Emissions are queued and drained by a single task rather than submitted independently
+     * because OpenLineage runs are ordered: a COMPLETE that overtakes its own START, or a heartbeat
+     * that overtakes a COMPLETE, leaves the receiver holding the wrong final state for the run. The
+     * queue keeps one job's events in submission order without serializing different jobs against
+     * each other, and occupies at most one executor thread per job.
+     *
+     * @param emission the emission to run; a failure it raises is logged rather than propagated, so
+     *     the next queued emission still runs
+     */
+    public void submitLineageEmission(Runnable emission) {
+        synchronized (lineageEmissionLock) {
+            lineageEmissions.add(emission);
+            if (drainingLineageEmissions) {
+                return;
+            }
+            drainingLineageEmissions = true;
+        }
+        try {
+            executorService.execute(this::drainLineageEmissions);
+        } catch (RejectedExecutionException rejected) {
+            int dropped;
+            synchronized (lineageEmissionLock) {
+                dropped = lineageEmissions.size();
+                lineageEmissions.clear();
+                drainingLineageEmissions = false;
+            }
+            // Dropped events have to be visible: reporting is enabled, so silence here is
+            // indistinguishable from a job that simply produced no lineage.
+            LOGGER.warning(
+                    "Dropped "
+                            + dropped
+                            + " lineage event(s) for job "
+                            + jobId
+                            + ": the coordinator executor is no longer accepting work");
+        }
+    }
+
+    /** Sends queued lineage emissions in order until the queue is empty. */
+    private void drainLineageEmissions() {
+        while (true) {
+            Runnable emission;
+            synchronized (lineageEmissionLock) {
+                emission = lineageEmissions.poll();
+                if (emission == null) {
+                    drainingLineageEmissions = false;
+                    return;
+                }
+            }
+            try {
+                emission.run();
+            } catch (Throwable error) {
+                LOGGER.warning("Failed to emit a lineage event for job " + jobId, error);
+            }
+        }
     }
 
     public PassiveCompletableFuture<JobResult> getJobMasterCompleteFuture() {

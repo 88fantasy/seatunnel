@@ -1370,12 +1370,15 @@ public class CheckpointCoordinator {
         if (!notifyCompleted(completedCheckpoint)) {
             return;
         }
-        checkpointManager.reportLineageHeartbeat(pipelineId);
         PendingCheckpoint pendingCheckpoint = pendingCheckpoints.remove(checkpointId);
         if (pendingCheckpoint != null) {
             pendingCheckpoint.abortCheckpointTimeoutFutureWhenIsCompleted();
         }
         pendingCounter.decrementAndGet();
+        // Reported only after the completed checkpoint has been booked and its timeout future
+        // disarmed: anything that delays this point delays disarming, and the timeout would then
+        // expire a checkpoint that actually succeeded.
+        checkpointManager.reportLineageHeartbeat(pipelineId);
 
         if (isCompleted()) {
             cleanPendingCheckpoint(CheckpointCloseReason.CHECKPOINT_COORDINATOR_COMPLETED);
