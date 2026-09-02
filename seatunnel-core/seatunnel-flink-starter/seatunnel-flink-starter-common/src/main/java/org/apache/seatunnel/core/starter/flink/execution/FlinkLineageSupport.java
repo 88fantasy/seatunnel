@@ -33,6 +33,7 @@ import org.apache.seatunnel.lineage.flink.LineageJobStatusHook;
 import org.apache.seatunnel.lineage.flink.ProxyReturnValues;
 
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.configuration.DeploymentOptions;
 import org.apache.flink.core.execution.JobListener;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.graph.StreamGraph;
@@ -147,14 +148,21 @@ public final class FlinkLineageSupport {
                 LOGGER.warn("Failed to emit Flink lineage start event", error);
             }
 
-            StreamGraph streamGraph = environment.getStreamGraph();
+            // Explicitly non-clearing: the no-argument overload clears the environment's
+            // transformations, so any later failure here would leave the caller's fallback
+            // execute(jobName) with an empty topology instead of a job that simply has no lineage.
+            StreamGraph streamGraph = environment.getStreamGraph(false);
             streamGraph.setJobName(jobName);
+            boolean clientReportsTerminalEvent = isAttachedSubmission(environment);
             Class<?> hookType = registerHook.getParameterTypes()[0];
             Object hook =
                     Proxy.newProxyInstance(
                             hookType.getClassLoader(),
                             new Class<?>[] {hookType},
-                            new LineageJobStatusHook(config.withAuthToken(null), events));
+                            new LineageJobStatusHook(
+                                    config.withAuthToken(null),
+                                    events,
+                                    clientReportsTerminalEvent));
             registerHook.invoke(streamGraph, hook);
             // Stated before submission because the JobManager-side failure that follows a missing
             // deployment is a bare ClassNotFoundException that never mentions lineage.
@@ -178,6 +186,30 @@ public final class FlinkLineageSupport {
         } catch (Throwable error) {
             LOGGER.warn("Failed to register Flink lineage support: {}", error.toString(), error);
             return null;
+        }
+    }
+
+    /**
+     * Returns whether the submission is attached, and therefore whether the client will report the
+     * terminal event itself.
+     *
+     * <p>This reads the same option Flink itself branches on in {@code
+     * StreamExecutionEnvironment.execute(StreamGraph)}, so the answer cannot disagree with which
+     * callback actually fires. It decides ownership of the terminal event: both the JobManager hook
+     * and the client listener observe the same run, but only the client can read the accumulators
+     * that carry the output statistics, so in attached mode the hook must stay silent rather than
+     * race a second COMPLETE that would overwrite them.
+     *
+     * <p>An unreadable configuration answers {@code false}, which keeps the hook reporting: a
+     * duplicated terminal event is recoverable, a missing one is not.
+     */
+    private static boolean isAttachedSubmission(StreamExecutionEnvironment environment) {
+        try {
+            return Boolean.TRUE.equals(
+                    environment.getConfiguration().get(DeploymentOptions.ATTACHED));
+        } catch (Throwable error) {
+            LOGGER.warn("Unable to determine whether the Flink submission is attached", error);
+            return false;
         }
     }
 
@@ -304,20 +336,24 @@ public final class FlinkLineageSupport {
                 Map<String, Object> accumulators = result.getAllAccumulatorResults();
                 Long rowCount = number(accumulators.get(MetricNames.SINK_WRITE_COUNT));
                 Long size = number(accumulators.get(MetricNames.SINK_WRITE_BYTES));
-                if (!positive(rowCount) && !positive(size)) {
-                    return null;
-                }
+                LineageOutputStatistics statistics =
+                        positive(rowCount) || positive(size)
+                                ? new LineageOutputStatistics(rowCount, size, "attempted")
+                                : null;
                 LineageConfig runtimeConfig =
                         config.withAuthToken(
                                 LineageConfig.resolveToken(
                                         FlinkClusterOptions.load(), System.getenv()));
-                LineageOutputStatistics statistics =
-                        new LineageOutputStatistics(rowCount, size, "attempted");
                 String flinkJobId = result.getJobID() == null ? null : result.getJobID().toString();
                 for (LineageEvent event : events) {
+                    // Emitted even without statistics: an attached submission silences the
+                    // JobManager hook, so skipping here would leave the run with no terminal event
+                    // at all rather than one that is merely missing its row counts.
+                    LineageEvent completed =
+                            statistics == null ? event : event.withOutputStatistics(statistics);
                     LineageRuntime.emit(
                             runtimeConfig,
-                            event.withOutputStatistics(statistics)
+                            completed
                                     .withEventType(LineageEventType.COMPLETE)
                                     .withRunProperty(
                                             LineageJobStatusHook.FLINK_JOB_ID_PROPERTY,

@@ -141,6 +141,10 @@ Zeta 在作业进入 `RUNNING` 时发射 `START`，并在终态发射对应的 `
 只有运行时提供所需 API 时，Flink 才会注册状态 hook。Flink 侧血缘需要 Flink 1.16 或更高版本；在
 SeaTunnel starter 中对应 Flink 1.20 路径，Flink 1.13 和 1.15 starter 不注册该 hook。
 
+Flink 作业成功结束时只有一侧上报终态事件，因此同一个 run 不会收到两次 `COMPLETE`。attached
+提交由客户端上报，因为只有客户端能读到输出统计；detached 提交由 JobManager 的 status hook
+上报，不带统计信息。`FAIL` 和 `ABORT` 始终由 status hook 上报。
+
 除 `openlineage_run_properties` 配置的属性外，run facet 还会携带 `engine` 属性（`zeta` 或
 `flink`）。Zeta 额外上报 `sink_action`，Flink 在终态事件上报 `flink_job_id`。runId 在作业提交前
 就已生成，那时还没有 Flink job ID，因此 `flink_job_id` 是把血缘 run 关联回 Flink UI 与 REST API

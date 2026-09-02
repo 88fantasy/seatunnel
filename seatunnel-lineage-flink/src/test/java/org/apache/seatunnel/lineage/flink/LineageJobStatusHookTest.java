@@ -78,7 +78,7 @@ class LineageJobStatusHookTest {
     @Test
     void emitsTheTerminalEventTypeThatMatchesTheCallback() throws Throwable {
         InvocationHandler hook =
-                new LineageJobStatusHook(config(null), Collections.singletonList(event()));
+                new LineageJobStatusHook(config(null), Collections.singletonList(event()), false);
         Method noop = LineageJobStatusHookTest.class.getDeclaredMethod("noop");
 
         hook.invoke(new Object(), noop, new Object[] {"job-1"});
@@ -105,6 +105,32 @@ class LineageJobStatusHookTest {
     }
 
     /**
+     * An attached client reports the successful terminal event itself, carrying the output
+     * statistics this hook cannot read. Only the successful callback is handed over: a failed or
+     * cancelled job resolves the client's result future exceptionally, so the client reports
+     * nothing and the hook stays the only source of those events.
+     */
+    @Test
+    void leavesTheSuccessfulTerminalEventToAnAttachedClient() throws Throwable {
+        InvocationHandler hook =
+                new LineageJobStatusHook(config(null), Collections.singletonList(event()), true);
+
+        invoke(hook, "onFinished", "job-1");
+        Assertions.assertTrue(
+                RecordingLineageBackend.EVENTS.isEmpty(),
+                "the attached client owns the successful terminal event");
+
+        invoke(hook, "onFailed", "job-2");
+        invoke(hook, "onCanceled", "job-3");
+
+        Assertions.assertEquals(2, RecordingLineageBackend.EVENTS.size());
+        Assertions.assertEquals(
+                LineageEventType.FAIL, RecordingLineageBackend.EVENTS.get(0).eventType());
+        Assertions.assertEquals(
+                LineageEventType.ABORT, RecordingLineageBackend.EVENTS.get(1).eventType());
+    }
+
+    /**
      * The JobGraph carrying this hook is written to the BlobServer and to HA storage, so the
      * instance must never hold a receiver credential. The JobManager resolves the token again from
      * its own configuration and environment.
@@ -114,7 +140,8 @@ class LineageJobStatusHookTest {
         LineageJobStatusHook hook =
                 new LineageJobStatusHook(
                         config("secret-token").withAuthToken(null),
-                        Collections.singletonList(event()));
+                        Collections.singletonList(event()),
+                        false);
 
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
@@ -150,7 +177,7 @@ class LineageJobStatusHookTest {
                         Collections.<String, Object>emptyMap());
 
         InvocationHandler hook =
-                new LineageJobStatusHook(broken, Collections.singletonList(event()));
+                new LineageJobStatusHook(broken, Collections.singletonList(event()), false);
 
         Assertions.assertDoesNotThrow(() -> invoke(hook, "onFinished", "job-1"));
         Assertions.assertTrue(RecordingLineageBackend.EVENTS.isEmpty());
@@ -159,7 +186,7 @@ class LineageJobStatusHookTest {
     @Test
     void answersObjectMethodsWithoutEmitting() throws Throwable {
         InvocationHandler hook =
-                new LineageJobStatusHook(config(null), Collections.singletonList(event()));
+                new LineageJobStatusHook(config(null), Collections.singletonList(event()), false);
         Object proxy = new Object();
 
         Assertions.assertEquals(

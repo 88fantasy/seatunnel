@@ -59,14 +59,19 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
 
     private final LineageConfig config;
     private final List<LineageEvent> events;
+    private final boolean clientReportsCompletion;
 
     /**
      * @param config lineage configuration with the auth token already removed
      * @param events the start events whose runs this hook closes
+     * @param clientReportsCompletion whether the submitting client reports the successful terminal
+     *     event itself, in which case this hook must not send a second one
      */
-    public LineageJobStatusHook(LineageConfig config, List<LineageEvent> events) {
+    public LineageJobStatusHook(
+            LineageConfig config, List<LineageEvent> events, boolean clientReportsCompletion) {
         this.config = config;
         this.events = new ArrayList<>(events);
+        this.clientReportsCompletion = clientReportsCompletion;
     }
 
     @Override
@@ -83,7 +88,13 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
                 return args != null && args.length == 1 && proxy == args[0];
             }
             if ("onFinished".equals(methodName)) {
-                emit(LineageEventType.COMPLETE, jobId(args));
+                // An attached client emits the successful terminal event with the output
+                // statistics read from the job accumulators, which are not reachable from here.
+                // Both events describe the same run, and the later arrival wins on the receiver,
+                // so exactly one of the two may send it.
+                if (!clientReportsCompletion) {
+                    emit(LineageEventType.COMPLETE, jobId(args));
+                }
             } else if ("onFailed".equals(methodName)) {
                 emit(LineageEventType.FAIL, jobId(args));
             } else if ("onCanceled".equals(methodName)) {
