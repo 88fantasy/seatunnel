@@ -437,7 +437,8 @@ public class MultipleTableJobConfigParser {
         // guard here would silently disable lineage for jobs enabled only at cluster level. The
         // extraction is a pure map lookup that yields an empty list for unsupported connectors.
         action.setLineageDatasets(
-                LineageDatasetFactory.fromConnectorOptions(readonlyConfig.getSourceMap()));
+                LineageDatasetFactory.fromConnectorOptions(
+                        factoryId, readonlyConfig.getSourceMap()));
         action.setParallelism(parallelism);
         for (CatalogTable catalogTable : tuple2._2()) {
             actions.add(new Tuple2<>(catalogTable, action));
@@ -854,7 +855,8 @@ public class MultipleTableJobConfigParser {
                         actionConfig);
         // See the note on the source action: the guard cannot live here, only in the JobMaster.
         sinkAction.setLineageDatasets(
-                LineageDatasetFactory.fromConnectorOptions(readonlyConfig.getSourceMap()));
+                LineageDatasetFactory.fromConnectorOptions(
+                        factoryId, readonlyConfig.getSourceMap()));
         try {
             if (!isStartWithSavePoint) {
                 handleSaveMode(sink);

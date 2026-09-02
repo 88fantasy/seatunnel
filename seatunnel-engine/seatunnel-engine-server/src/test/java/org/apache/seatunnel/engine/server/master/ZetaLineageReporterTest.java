@@ -19,8 +19,14 @@ package org.apache.seatunnel.engine.server.master;
 
 import org.apache.seatunnel.api.common.metrics.JobMetrics;
 import org.apache.seatunnel.api.common.metrics.Measurement;
-import org.apache.seatunnel.api.table.catalog.TablePath;
+import org.apache.seatunnel.api.sink.SeaTunnelSink;
+import org.apache.seatunnel.api.source.SeaTunnelSource;
 import org.apache.seatunnel.engine.common.config.JobConfig;
+import org.apache.seatunnel.engine.core.dag.actions.SinkAction;
+import org.apache.seatunnel.engine.core.dag.actions.SourceAction;
+import org.apache.seatunnel.engine.core.dag.logical.LogicalDag;
+import org.apache.seatunnel.engine.core.dag.logical.LogicalEdge;
+import org.apache.seatunnel.engine.core.dag.logical.LogicalVertex;
 import org.apache.seatunnel.engine.core.job.JobImmutableInformation;
 import org.apache.seatunnel.engine.core.job.RestoreMode;
 import org.apache.seatunnel.lineage.LineageConfig;
@@ -34,6 +40,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -149,48 +156,85 @@ class ZetaLineageReporterTest {
         Assertions.assertFalse(invokeShouldReportHeartbeat(jobMaster, 2, Long.MAX_VALUE));
     }
 
-    @Test
-    void shouldMatchMultiTableDatasetByExactTablePath() throws Exception {
-        LineageDataset firstPaimonTable = LineageDataset.of("paimon://catalog/db1", "orders");
-        LineageDataset secondPaimonTable = LineageDataset.of("paimon://catalog/db2", "orders");
-        LineageDataset firstJdbcTable = LineageDataset.of("mysql://host:3306", "db1.orders");
-
-        Assertions.assertTrue(
-                invokeMatchesTablePath(TablePath.of("db1", "orders"), firstPaimonTable));
-        Assertions.assertFalse(
-                invokeMatchesTablePath(TablePath.of("db2", "orders"), firstPaimonTable));
-        Assertions.assertTrue(
-                invokeMatchesTablePath(TablePath.of("db2", "orders"), secondPaimonTable));
-        Assertions.assertTrue(
-                invokeMatchesTablePath(TablePath.of("db1", "orders"), firstJdbcTable));
-        Assertions.assertFalse(
-                invokeMatchesTablePath(TablePath.of("db2", "orders"), firstJdbcTable));
-    }
-
     /**
-     * A catalog whose tables carry a schema (PostgreSQL, Oracle) produces a {@code
-     * database.schema.table} path, while the connector-level dataset name is {@code
-     * database.table}. Comparing only the full name would never match, and the sink would report no
-     * lineage at all without any error, so both forms must be accepted. The schema segment must
-     * still not make two different databases collide.
+     * Regression for a failure that only appears once the logical DAG has crossed a serialization
+     * boundary: {@code AbstractAction.upstreams} is {@code transient}, so on the master it is null
+     * and walking {@code Action.getUpstream()} throws. The traversal must go through the DAG edges,
+     * which are serialized as vertex IDs, so this test clears the action upstreams to reproduce the
+     * deserialized shape rather than the freshly built one.
      */
     @Test
-    void shouldMatchDatasetWhenCatalogTablePathCarriesASchemaSegment() throws Exception {
-        LineageDataset ordersInFirstDatabase =
-                LineageDataset.of("postgresql://host:5432", "db1.orders");
+    void shouldWalkSourcesThroughDagEdgesWhenActionUpstreamsAreLost() throws Exception {
+        LineageDataset sourceDataset = LineageDataset.of("mysql://host:3306", "db.src");
 
-        Assertions.assertTrue(
-                invokeMatchesTablePath(
-                        TablePath.of("db1", "public", "orders"), ordersInFirstDatabase));
-        Assertions.assertTrue(
-                invokeMatchesTablePath(
-                        TablePath.of("db1", "reporting", "orders"), ordersInFirstDatabase));
-        Assertions.assertFalse(
-                invokeMatchesTablePath(
-                        TablePath.of("db2", "public", "orders"), ordersInFirstDatabase));
-        Assertions.assertFalse(
-                invokeMatchesTablePath(
-                        TablePath.of("db1", "public", "customers"), ordersInFirstDatabase));
+        SourceAction<?, ?, ?> sourceAction =
+                new SourceAction<>(
+                        1L,
+                        "source",
+                        mock(SeaTunnelSource.class),
+                        new HashSet<>(),
+                        new HashSet<>());
+        sourceAction.setLineageDatasets(Collections.singletonList(sourceDataset));
+        SinkAction<?, ?, ?, ?> sinkAction =
+                new SinkAction<>(
+                        3L, "sink", mock(SeaTunnelSink.class), new HashSet<>(), new HashSet<>());
+
+        LogicalVertex sourceVertex = new LogicalVertex(1L, sourceAction, 1);
+        LogicalVertex transformVertex =
+                new LogicalVertex(
+                        2L, mock(org.apache.seatunnel.engine.core.dag.actions.Action.class), 1);
+        LogicalVertex sinkVertex = new LogicalVertex(3L, sinkAction, 1);
+
+        LogicalDag dag = new LogicalDag();
+        dag.addLogicalVertex(sourceVertex);
+        dag.addLogicalVertex(transformVertex);
+        dag.addLogicalVertex(sinkVertex);
+        dag.addEdge(new LogicalEdge(1L, 2L));
+        dag.addEdge(new LogicalEdge(2L, 3L));
+
+        // Reproduce the deserialized state: the transient upstream links are gone.
+        clearUpstreams(sourceAction);
+        clearUpstreams(sinkAction);
+
+        List<LineageDataset> inputs = invokeSourceDatasets(dag, 3L);
+
+        Assertions.assertEquals(
+                Collections.singletonList(sourceDataset),
+                inputs,
+                "the source must be reached through the transform via DAG edges");
+        Assertions.assertEquals(
+                Collections.emptyList(),
+                invokeSourceDatasets(dag, 99L),
+                "an unknown vertex yields no inputs rather than failing");
+        Assertions.assertEquals(
+                Collections.emptyList(),
+                invokeSourceDatasets(dag, null),
+                "a missing vertex id yields no inputs rather than failing");
+    }
+
+    private static void clearUpstreams(Object action) throws Exception {
+        Class<?> type = action.getClass();
+        while (type != null) {
+            try {
+                Field field = type.getDeclaredField("upstreams");
+                field.setAccessible(true);
+                field.set(action, null);
+                return;
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        throw new IllegalStateException("upstreams field not found");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<LineageDataset> invokeSourceDatasets(LogicalDag dag, Long sinkVertexId)
+            throws Exception {
+        Method method =
+                ZetaLineageReporter.class.getDeclaredMethod(
+                        "sourceDatasets", LogicalDag.class, Long.class);
+        method.setAccessible(true);
+        return (List<LineageDataset>) method.invoke(null, dag, sinkVertexId);
     }
 
     private static JobMetrics invokeOutputMetrics(JobMaster jobMaster, LineageEventType eventType)
@@ -215,15 +259,6 @@ class ZetaLineageReporterTest {
         doReturn(1L).when(jobMaster).getJobId();
         doReturn(history).when(historyService).getJobMetrics(1L);
         return jobMaster;
-    }
-
-    private static boolean invokeMatchesTablePath(TablePath tablePath, LineageDataset dataset)
-            throws Exception {
-        Method method =
-                ZetaLineageReporter.class.getDeclaredMethod(
-                        "matchesTablePath", TablePath.class, LineageDataset.class);
-        method.setAccessible(true);
-        return (boolean) method.invoke(null, tablePath, dataset);
     }
 
     private static boolean invokeShouldReportHeartbeat(

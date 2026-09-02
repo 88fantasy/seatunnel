@@ -19,7 +19,6 @@ package org.apache.seatunnel.engine.server.master;
 
 import org.apache.seatunnel.api.common.metrics.JobMetrics;
 import org.apache.seatunnel.api.common.metrics.Measurement;
-import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.sink.multitablesink.MultiTableSink;
 import org.apache.seatunnel.api.table.catalog.TablePath;
 import org.apache.seatunnel.common.constants.JobMode;
@@ -28,6 +27,7 @@ import org.apache.seatunnel.engine.core.dag.actions.Action;
 import org.apache.seatunnel.engine.core.dag.actions.SinkAction;
 import org.apache.seatunnel.engine.core.dag.actions.SourceAction;
 import org.apache.seatunnel.engine.core.dag.logical.LogicalDag;
+import org.apache.seatunnel.engine.core.dag.logical.LogicalEdge;
 import org.apache.seatunnel.engine.core.dag.logical.LogicalVertex;
 import org.apache.seatunnel.lineage.LineageConfig;
 import org.apache.seatunnel.lineage.LineageDataset;
@@ -44,10 +44,12 @@ import com.hazelcast.logging.Logger;
 
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
-import java.util.IdentityHashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -138,18 +140,21 @@ public final class ZetaLineageReporter {
         }
         JobMetrics metrics = includeStatistics ? outputMetrics(jobMaster, eventType) : null;
         List<LineageEvent> events = new ArrayList<>();
+        int sinkCount = 0;
         for (LogicalVertex vertex : logicalDag.getLogicalVertexMap().values()) {
             Action action = vertex.getAction();
             if (!(action instanceof SinkAction)) {
                 continue;
             }
             SinkAction<?, ?, ?, ?> sinkAction = (SinkAction<?, ?, ?, ?>) action;
-            List<LineageDataset> inputs = sourceDatasets(sinkAction);
-            for (LineageDataset output : sinkDatasets(sinkAction)) {
+            sinkCount++;
+            List<LineageDataset> inputs = sourceDatasets(logicalDag, vertex.getVertexId());
+            List<LineageDataset> outputs = sinkDatasets(sinkAction);
+            for (LineageDataset output : outputs) {
                 LineageDataset eventOutput = output;
                 if (includeStatistics && eventType != LineageEventType.FAIL) {
                     LineageOutputStatistics statistics =
-                            outputStatistics(metrics, sinkAction, output);
+                            outputStatistics(metrics, sinkAction, outputs.size());
                     if (statistics != null) {
                         eventOutput = output.withOutputStatistics(statistics);
                     }
@@ -180,6 +185,19 @@ public final class ZetaLineageReporter {
                                 .outputs(Collections.singletonList(eventOutput))
                                 .build());
             }
+        }
+        if (events.isEmpty()) {
+            // Reporting is enabled, so producing nothing is a result the operator needs to see;
+            // otherwise a job with unsupported or unidentifiable sinks looks identical to a
+            // working one that simply has no lineage yet.
+            LOGGER.info(
+                    "No lineage events built for job "
+                            + jobMaster.getJobId()
+                            + ": "
+                            + logicalDag.getLogicalVertexMap().size()
+                            + " vertices, "
+                            + sinkCount
+                            + " sink actions, none of which resolved to a supported dataset");
         }
         return events;
     }
@@ -224,45 +242,77 @@ public final class ZetaLineageReporter {
         }
     }
 
-    private static List<LineageDataset> sourceDatasets(Action action) {
+    /**
+     * Walks the logical DAG backwards from a sink vertex and collects the datasets of every source
+     * reachable from it.
+     *
+     * <p>The traversal deliberately uses {@link LogicalDag#getEdges()} rather than {@link
+     * Action#getUpstream()}. {@code AbstractAction.upstreams} is {@code transient}, so after the
+     * logical DAG is deserialized on the master the accessor returns {@code null} even though its
+     * declaration is annotated {@code @NonNull} — the annotation is documentation, not a runtime
+     * check. Edges survive because {@code LogicalDag} serializes them explicitly, carrying vertex
+     * IDs rather than vertex objects to avoid a serialization cycle.
+     *
+     * @param logicalDag restored logical DAG
+     * @param sinkVertexId vertex ID of the sink to walk back from
+     * @return datasets of all reachable sources, without duplicates
+     */
+    private static List<LineageDataset> sourceDatasets(LogicalDag logicalDag, Long sinkVertexId) {
+        if (sinkVertexId == null) {
+            return Collections.emptyList();
+        }
+        Map<Long, List<Long>> upstreamsByVertex = new HashMap<>();
+        for (LogicalEdge edge : logicalDag.getEdges()) {
+            if (edge.getTargetVertexId() == null || edge.getInputVertexId() == null) {
+                continue;
+            }
+            upstreamsByVertex
+                    .computeIfAbsent(edge.getTargetVertexId(), ignored -> new ArrayList<>())
+                    .add(edge.getInputVertexId());
+        }
+
         Set<LineageDataset> datasets = new LinkedHashSet<>();
-        collectSourceDatasets(action, Collections.newSetFromMap(new IdentityHashMap<>()), datasets);
+        Set<Long> visited = new HashSet<>();
+        Deque<Long> pending = new ArrayDeque<>();
+        pending.add(sinkVertexId);
+        while (!pending.isEmpty()) {
+            Long vertexId = pending.poll();
+            if (!visited.add(vertexId)) {
+                continue;
+            }
+            LogicalVertex vertex = logicalDag.getLogicalVertexMap().get(vertexId);
+            if (vertex != null && vertex.getAction() instanceof SourceAction) {
+                datasets.addAll(((SourceAction<?, ?, ?>) vertex.getAction()).getLineageDatasets());
+                continue;
+            }
+            List<Long> upstreams = upstreamsByVertex.get(vertexId);
+            if (upstreams != null) {
+                pending.addAll(upstreams);
+            }
+        }
         return new ArrayList<>(datasets);
     }
 
-    private static void collectSourceDatasets(
-            Action action, Set<Action> visited, Set<LineageDataset> datasets) {
-        if (!visited.add(action)) {
-            return;
-        }
-        if (action instanceof SourceAction) {
-            datasets.addAll(((SourceAction<?, ?, ?>) action).getLineageDatasets());
-            return;
-        }
-        for (Action upstream : action.getUpstream()) {
-            collectSourceDatasets(upstream, visited, datasets);
-        }
-    }
-
+    /**
+     * Returns the datasets this sink writes to.
+     *
+     * <p>The datasets come from the connector options, which name the write target directly. They
+     * are deliberately not cross-checked against {@link MultiTableSink#getSinks()}: that map is
+     * keyed by the <em>upstream</em> table identity feeding each writer, not by the table being
+     * written. For a job such as {@code FakeSource -> Paimon} the key is the source's {@code
+     * plugin_output} while the target is the configured {@code database.table}, so filtering on it
+     * discards every dataset and the job reports no lineage at all.
+     */
     private static List<LineageDataset> sinkDatasets(SinkAction<?, ?, ?, ?> action) {
         List<LineageDataset> configured = action.getLineageDatasets();
-        if (!(action.getSink() instanceof MultiTableSink)) {
-            return configured;
+        if (configured.isEmpty()) {
+            LOGGER.info(
+                    "Sink action "
+                            + action.getName()
+                            + " has no lineage datasets; its connector options did not identify a"
+                            + " supported table");
         }
-
-        // MultiTableSink intentionally returns no write CatalogTable; inspect its actual sink map.
-        Map<TablePath, SeaTunnelSink> sinks = ((MultiTableSink) action.getSink()).getSinks();
-        if (sinks.isEmpty()) {
-            return Collections.emptyList();
-        }
-        List<LineageDataset> matched = new ArrayList<>();
-        for (TablePath tablePath : sinks.keySet()) {
-            configured.stream()
-                    .filter(dataset -> matchesTablePath(tablePath, dataset))
-                    .findFirst()
-                    .ifPresent(matched::add);
-        }
-        return matched;
+        return configured;
     }
 
     private static JobMetrics outputMetrics(JobMaster jobMaster, LineageEventType eventType) {
@@ -273,15 +323,15 @@ public final class ZetaLineageReporter {
     }
 
     private static LineageOutputStatistics outputStatistics(
-            JobMetrics metrics, SinkAction<?, ?, ?, ?> sinkAction, LineageDataset output) {
+            JobMetrics metrics, SinkAction<?, ?, ?, ?> sinkAction, int outputCount) {
         List<TablePath> tablePaths = metricTablePaths(sinkAction);
-        Long committedCount = metricValue(metrics, "SinkCommittedCount", output, tablePaths);
-        Long committedBytes = metricValue(metrics, "SinkCommittedBytes", output, tablePaths);
+        Long committedCount = metricValue(metrics, "SinkCommittedCount", outputCount, tablePaths);
+        Long committedBytes = metricValue(metrics, "SinkCommittedBytes", outputCount, tablePaths);
         if (committedCount != null && committedCount > 0) {
             return new LineageOutputStatistics(committedCount, committedBytes, "committed");
         }
-        Long writeCount = metricValue(metrics, "SinkWriteCount", output, tablePaths);
-        Long writeBytes = metricValue(metrics, "SinkWriteBytes", output, tablePaths);
+        Long writeCount = metricValue(metrics, "SinkWriteCount", outputCount, tablePaths);
+        Long writeBytes = metricValue(metrics, "SinkWriteBytes", outputCount, tablePaths);
         if (writeCount != null && writeCount > 0) {
             return new LineageOutputStatistics(writeCount, writeBytes, "attempted");
         }
@@ -299,61 +349,35 @@ public final class ZetaLineageReporter {
         return Collections.emptyList();
     }
 
+    /**
+     * Reads one counter for a sink output.
+     *
+     * <p>Sink metrics are suffixed with the <em>upstream</em> table identity, while {@code output}
+     * names the write target, so the two cannot be matched by name. When the sink writes a single
+     * target every upstream slice belongs to it and the slices are summed; otherwise the mapping is
+     * ambiguous and the statistic is omitted rather than guessed, because a plausible-looking wrong
+     * row count is worse on a lineage graph than a missing one.
+     *
+     * @param outputCount number of datasets this sink writes to
+     */
     private static Long metricValue(
-            JobMetrics metrics,
-            String metricName,
-            LineageDataset output,
-            List<TablePath> tablePaths) {
+            JobMetrics metrics, String metricName, int outputCount, List<TablePath> tablePaths) {
+        if (outputCount > 1) {
+            return null;
+        }
+        long total = 0;
+        boolean found = false;
         for (TablePath tablePath : tablePaths) {
-            if (!matchesTablePath(tablePath, output)) {
-                continue;
-            }
             Long value = sum(metrics, metricName + "#" + tablePath.getFullName());
             if (value != null) {
-                return value;
+                total += value;
+                found = true;
             }
         }
-        if (tablePaths.size() <= 1) {
-            Long global = sum(metrics, metricName);
-            if (global != null) {
-                return global;
-            }
+        if (found) {
+            return total;
         }
-        return null;
-    }
-
-    /**
-     * Matches a catalog table path against a dataset derived from connector options.
-     *
-     * <p>Paimon carries the database in the namespace rather than in the dataset name, so it is
-     * matched on database plus table.
-     *
-     * <p>For every other connector the dataset name is {@code database.table}, while {@link
-     * TablePath#getFullName()} inserts a schema segment when the catalog has one (PostgreSQL,
-     * Oracle). Comparing only against the full name would therefore never match a {@code
-     * database.schema.table} path, and the sink would silently report no lineage at all, so the
-     * database-and-table form is compared as well.
-     */
-    private static boolean matchesTablePath(TablePath tablePath, LineageDataset dataset) {
-        if (dataset.namespace().startsWith("paimon://")) {
-            int separator = dataset.namespace().lastIndexOf('/');
-            return separator >= 0
-                    && tablePath.getDatabaseName() != null
-                    && tablePath
-                            .getDatabaseName()
-                            .equals(dataset.namespace().substring(separator + 1))
-                    && tablePath.getTableName().equals(dataset.name());
-        }
-        String fullName = tablePath.getFullName();
-        if (fullName.equals(dataset.name()) || fullName.equals(dataset.tablePath())) {
-            return true;
-        }
-        if (tablePath.getSchemaName() == null || tablePath.getDatabaseName() == null) {
-            return false;
-        }
-        String databaseAndTable = tablePath.getDatabaseName() + "." + tablePath.getTableName();
-        return databaseAndTable.equals(dataset.name())
-                || databaseAndTable.equals(dataset.tablePath());
+        return sum(metrics, metricName);
     }
 
     private static Long sum(JobMetrics metrics, String metricName) {

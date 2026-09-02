@@ -32,12 +32,32 @@ public final class LineageDatasetFactory {
      *
      * <p>Only connector options that provide a real table identity are returned. Placeholder {@code
      * default.default.default} paths are excluded.
+     *
+     * @param options connector options, without the enclosing plugin block
      */
     public static List<LineageDataset> fromConnectorOptions(Map<String, ?> options) {
+        return fromConnectorOptions(null, options);
+    }
+
+    /**
+     * Extracts canonical dataset identities for a connector whose plugin name is already known.
+     *
+     * <p>The plugin name must be supplied by the caller whenever it has one. SeaTunnel jobs
+     * normally declare a connector as a named block ({@code sink { Paimon { ... } }}), and the
+     * option map for that block does not contain a {@code plugin_name} entry at all, so inferring
+     * the name from the options alone silently yields no lineage for the most common job syntax.
+     *
+     * @param pluginName connector plugin name, or {@code null} to infer it from the options
+     * @param options connector options, without the enclosing plugin block
+     */
+    public static List<LineageDataset> fromConnectorOptions(
+            String pluginName, Map<String, ?> options) {
         if (options == null || options.isEmpty()) {
             return Collections.emptyList();
         }
-        String pluginName = string(options, "plugin_name", "plugin-name");
+        if (pluginName == null || pluginName.trim().isEmpty()) {
+            pluginName = string(options, "plugin_name", "plugin-name");
+        }
         if (pluginName == null) {
             pluginName = nestedPluginName(options);
         }
