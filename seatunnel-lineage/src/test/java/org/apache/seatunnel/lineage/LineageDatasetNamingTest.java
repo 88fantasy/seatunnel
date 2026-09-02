@@ -26,6 +26,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LineageDatasetNamingTest {
@@ -70,13 +71,8 @@ class LineageDatasetNamingTest {
         List<LineageDataset> datasets = LineageDatasetFactory.fromConnectorOptions(options);
 
         assertEquals("mysql://db.example:3306", datasets.get(0).namespace());
+        // table_path wins over the database named in the JDBC URL.
         assertEquals("table_database.orders", datasets.get(0).name());
-        assertEquals("table_database.orders", datasets.get(0).tablePath());
-        assertEquals(
-                "table_database.orders",
-                datasets.get(0)
-                        .withOutputStatistics(new LineageOutputStatistics(1L, 2L, "attempted"))
-                        .tablePath());
     }
 
     @Test
@@ -99,8 +95,13 @@ class LineageDatasetNamingTest {
         assertEquals(0, LineageDatasetFactory.fromConnectorOptions(options).size());
     }
 
+    /**
+     * Two tables that share a name in different databases must stay distinct nodes on the lineage
+     * graph, so the database has to be part of the dataset identity rather than only of the
+     * namespace.
+     */
     @Test
-    void matchesPaimonTablesByTheirCompleteTablePath() {
+    void keepsSameNamedPaimonTablesInDifferentDatabasesDistinct() {
         Map<String, Object> first = new HashMap<>();
         first.put("database", "db_one");
         first.put("table", "orders");
@@ -115,9 +116,11 @@ class LineageDatasetNamingTest {
         List<LineageDataset> datasets = LineageDatasetFactory.fromConnectorOptions(options);
 
         assertEquals(2, datasets.size());
-        assertTrue(LineageDatasetNaming.matchesTablePath(datasets.get(0), "db_one.orders"));
-        assertFalse(LineageDatasetNaming.matchesTablePath(datasets.get(0), "db_two.orders"));
-        assertTrue(LineageDatasetNaming.matchesTablePath(datasets.get(1), "db_two.orders"));
+        assertEquals("paimon://analytics/db_one", datasets.get(0).namespace());
+        assertEquals("paimon://analytics/db_two", datasets.get(1).namespace());
+        assertEquals("orders", datasets.get(0).name());
+        assertEquals("orders", datasets.get(1).name());
+        assertNotEquals(datasets.get(0), datasets.get(1));
     }
 
     @Test

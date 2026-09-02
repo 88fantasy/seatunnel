@@ -88,7 +88,6 @@ public final class LineageDatasetFactory {
                 continue;
             }
             LineageDatasetNaming.paimon(catalog, reference.database, reference.table)
-                    .map(dataset -> withTablePath(dataset, reference.tablePath))
                     .ifPresent(result::add);
         }
         return result;
@@ -107,7 +106,6 @@ public final class LineageDatasetFactory {
                 continue;
             }
             LineageDatasetNaming.doris(host, queryPort, reference.database, reference.table)
-                    .map(dataset -> withTablePath(dataset, reference.tablePath))
                     .ifPresent(result::add);
         }
         return result;
@@ -134,12 +132,7 @@ public final class LineageDatasetFactory {
                     continue;
                 }
                 String database = reference.database == null ? urlDatabase : reference.database;
-                String tablePath =
-                        reference.tablePath == null
-                                ? joinTablePath(database, reference.table)
-                                : reference.tablePath;
                 LineageDatasetNaming.jdbc(scheme, host, port, database, reference.table)
-                        .map(dataset -> withTablePath(dataset, tablePath))
                         .ifPresent(result::add);
             }
             return result;
@@ -244,17 +237,8 @@ public final class LineageDatasetFactory {
             } else {
                 table = parts[0];
             }
-            return new TableReference(database, table, tablePath);
         }
-        return new TableReference(database, table, joinTablePath(database, table));
-    }
-
-    private static LineageDataset withTablePath(LineageDataset dataset, String tablePath) {
-        return LineageDataset.of(dataset.namespace(), dataset.name(), tablePath);
-    }
-
-    private static String joinTablePath(String database, String table) {
-        return database == null || table == null ? null : database + "." + table;
+        return new TableReference(database, table);
     }
 
     private static String join(String[] parts, int start) {
@@ -282,12 +266,10 @@ public final class LineageDatasetFactory {
     private static final class TableReference {
         private final String database;
         private final String table;
-        private final String tablePath;
 
-        private TableReference(String database, String table, String tablePath) {
+        private TableReference(String database, String table) {
             this.database = database;
             this.table = table;
-            this.tablePath = tablePath;
         }
     }
 }

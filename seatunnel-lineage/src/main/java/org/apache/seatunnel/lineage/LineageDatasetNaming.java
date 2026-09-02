@@ -70,48 +70,9 @@ public final class LineageDatasetNaming {
                                         database + "." + value));
     }
 
-    /** Returns whether the three-part table path is the placeholder default path. */
-    public static boolean isDefaultTablePath(String database, String schema, String table) {
-        String path =
-                String.valueOf(database)
-                        + "."
-                        + String.valueOf(schema)
-                        + "."
-                        + String.valueOf(table);
-        return DEFAULT_TABLE_PATH.equals(path);
-    }
-
     /** Returns whether a complete table path is the placeholder default path. */
     public static boolean isDefaultTablePath(String fullName) {
         return fullName != null && DEFAULT_TABLE_PATH.equals(fullName.trim());
-    }
-
-    /**
-     * Returns whether a dataset was derived from the supplied complete table path.
-     *
-     * <p>This comparison is deliberately exact. Suffix matching would conflate same-named tables in
-     * different databases in a multi-table job.
-     */
-    public static boolean matchesTablePath(LineageDataset dataset, String fullName) {
-        if (dataset == null || fullName == null || fullName.trim().isEmpty()) {
-            return false;
-        }
-        String normalizedPath = fullName.trim();
-        if (isDefaultTablePath(normalizedPath)) {
-            return false;
-        }
-        if (dataset.tablePath() != null) {
-            return dataset.tablePath().equals(normalizedPath);
-        }
-        if (dataset.namespace().startsWith("paimon://")) {
-            int databaseStart = dataset.namespace().lastIndexOf('/') + 1;
-            if (databaseStart <= 0 || databaseStart >= dataset.namespace().length()) {
-                return false;
-            }
-            return (dataset.namespace().substring(databaseStart) + "." + dataset.name())
-                    .equals(normalizedPath);
-        }
-        return dataset.name().equals(normalizedPath);
     }
 
     private static Optional<String> table(String database, String table) {

@@ -301,10 +301,6 @@ public final class LineageConfig implements Serializable {
         if (values.containsKey(dotted)) {
             return Lookup.of(values.get(dotted));
         }
-        String underscored = dotted.replace(".", "_");
-        if (values.containsKey(underscored)) {
-            return Lookup.of(values.get(underscored));
-        }
         String prefixed = "openlineage." + key.substring("openlineage_".length());
         if (values.containsKey(prefixed)) {
             return Lookup.of(values.get(prefixed));

@@ -20,39 +20,29 @@ package org.apache.seatunnel.lineage;
 import java.io.Serializable;
 import java.util.Objects;
 
-/** A dataset identity, optional source table path, and optional output statistics. */
+/** A dataset identity with optional output statistics. */
 public final class LineageDataset implements Serializable {
     private static final long serialVersionUID = 1L;
 
     private final String namespace;
     private final String name;
-    private final String tablePath;
     private final LineageOutputStatistics outputStatistics;
 
     private LineageDataset(
-            String namespace,
-            String name,
-            String tablePath,
-            LineageOutputStatistics outputStatistics) {
+            String namespace, String name, LineageOutputStatistics outputStatistics) {
         this.namespace = requireText(namespace, "namespace");
         this.name = requireText(name, "name");
-        this.tablePath = blankToNull(tablePath);
         this.outputStatistics = outputStatistics;
     }
 
-    /** Creates a dataset identity without a source-specific table path. */
+    /** Creates a dataset identity. */
     public static LineageDataset of(String namespace, String name) {
-        return new LineageDataset(namespace, name, null, null);
-    }
-
-    /** Creates a dataset identity and records the exact source table path when one is available. */
-    public static LineageDataset of(String namespace, String name, String tablePath) {
-        return new LineageDataset(namespace, name, tablePath, null);
+        return new LineageDataset(namespace, name, null);
     }
 
     /** Returns a copy with output statistics attached. */
     public LineageDataset withOutputStatistics(LineageOutputStatistics statistics) {
-        return new LineageDataset(namespace, name, tablePath, statistics);
+        return new LineageDataset(namespace, name, statistics);
     }
 
     /** Returns the dataset namespace. */
@@ -63,11 +53,6 @@ public final class LineageDataset implements Serializable {
     /** Returns the canonical dataset name. */
     public String name() {
         return name;
-    }
-
-    /** Returns the exact source table path used to derive this dataset, when available. */
-    public String tablePath() {
-        return tablePath;
     }
 
     /** Returns the output statistics, or {@code null} when no statistics were collected. */
@@ -97,9 +82,5 @@ public final class LineageDataset implements Serializable {
             throw new IllegalArgumentException(field + " must not be blank");
         }
         return value;
-    }
-
-    private static String blankToNull(String value) {
-        return value == null || value.trim().isEmpty() ? null : value.trim();
     }
 }
