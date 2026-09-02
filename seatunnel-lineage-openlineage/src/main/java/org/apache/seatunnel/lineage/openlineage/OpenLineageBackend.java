@@ -135,8 +135,7 @@ public final class OpenLineageBackend implements LineageBackend {
             post.setHeader("Authorization", "Bearer " + config.authToken());
         }
         post.setEntity(new StringEntity(payload, ContentType.APPLICATION_JSON));
-        try (CloseableHttpClient client = HttpClients.createDefault();
-                CloseableHttpResponse response = client.execute(post)) {
+        try (CloseableHttpResponse response = SharedClient.INSTANCE.execute(post)) {
             HttpEntity entity = response.getEntity();
             EntityUtils.consumeQuietly(entity);
             int status = response.getStatusLine().getStatusCode();
@@ -144,5 +143,19 @@ public final class OpenLineageBackend implements LineageBackend {
                 throw new IOException("OpenLineage endpoint returned HTTP " + status);
             }
         }
+    }
+
+    /**
+     * Holds the client shared by every send.
+     *
+     * <p>Building one per attempt also builds a connection pool and an SSL context per attempt,
+     * which on the engine paths that emit lineage costs more than the request itself. Timeouts stay
+     * per request through {@link RequestConfig}, so one client can serve every configuration. It is
+     * intentionally never closed: it lives as long as the process that reports lineage.
+     */
+    private static final class SharedClient {
+        private static final CloseableHttpClient INSTANCE = HttpClients.createDefault();
+
+        private SharedClient() {}
     }
 }
