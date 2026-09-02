@@ -114,8 +114,23 @@ openlineage.heartbeat_min_interval_ms: 3600000
 openlineage.producer: https://seatunnel.apache.org/<version>
 ```
 
-血缘 contract 和 OpenLineage backend 等 JAR 必须放在 Flink 集群的 `lib/` 目录中。如果安装环境同时
-支持 Flink 1.20+ 和 legacy 部署，应在实际使用的两种配置文件布局中保持相同配置。
+### 在集群上安装血缘产物
+
+Flink 侧只有一个可部署产物，由 `seatunnel-lineage-flink` 模块构建：
+
+```text
+seatunnel-lineage-flink-<version>-shaded.jar
+```
+
+把它放进 JobManager 的 `$FLINK_HOME/lib` 目录并重启 JobManager —— Flink 的 classpath 在启动时固定。
+只放一份，升级时先删掉旧版本：`lib/` 里同时存在两个版本会让实际的 classpath 顺序变得不确定。
+
+该产物把 Jackson、OpenLineage 模型、Apache HttpClient 以及 commons-logging 桥接一并 relocate 到
+`org.apache.seatunnel.lineage.shaded` 之下。这一点很关键：`lib/` 位于父 classloader，放进去的类对该
+集群上的**所有**作业可见，relocate 才能保证本产物不会改变那些作业看到的 Jackson 版本。不要用
+SeaTunnel starter jar 代替它 —— 后者携带的是未 relocate 的同名依赖。
+
+如果安装环境同时支持 Flink 1.20+ 和 legacy 部署，应在实际使用的两种配置文件布局中保持相同配置。
 
 ## 事件与数据集命名
 
@@ -162,7 +177,8 @@ Paimon 数据集。Doris 的 `fenodes` 通常是 HTTP Stream Load
    abandoned-run 超时约束。即使开启 checkpoint 心跳，也不能延长接收端对未完成 run 的第二层
    7 天绝对寿命上限；持续上报但永不终止的 run 仍可能在 7 天后被标记为 `ABANDONED`，之后
    到达的终态事件可以覆盖这一推断状态。
-5. Flink 血缘 JAR 必须安装到 JobManager 的 `lib/` 目录，**未安装时开启血缘的作业会提交失败**。
+5. `seatunnel-lineage-flink-<version>-shaded.jar` 必须安装到 JobManager 的 `lib/` 目录，
+   **未安装时开启血缘的作业会提交失败**。
    状态 hook 是 JobGraph 的结构性字段，JobManager 在建立 user class loader 之前就用 system
    class loader 反序列化它，因此把类打进提交的作业 JAR 中不起作用。这是刻意的设计——静默丢失
    血缘比拒绝启动更糟——提交错误会指出缺失的类以及解决办法。若要在未安装的情况下提交作业，

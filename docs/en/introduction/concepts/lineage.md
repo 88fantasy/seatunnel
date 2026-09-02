@@ -120,9 +120,26 @@ openlineage.heartbeat_min_interval_ms: 3600000
 openlineage.producer: https://seatunnel.apache.org/<version>
 ```
 
-The lineage backend JARs, including the lineage contract and OpenLineage backend artifacts, must be
-available in the Flink cluster `lib/` directory. Keep the same cluster configuration in both
-configuration-file layouts when an installation supports both Flink 1.20+ and legacy deployments.
+### Installing the lineage artifact on the cluster
+
+The Flink integration ships one deployable artifact, built by the `seatunnel-lineage-flink` module:
+
+```text
+seatunnel-lineage-flink-<version>-shaded.jar
+```
+
+Install it in the JobManager's `$FLINK_HOME/lib` directory and restart the JobManager, because a
+Flink class path is fixed at startup. Deploy exactly one copy, and remove the previous version when
+upgrading: two versions in `lib/` leave the effective class path order undefined.
+
+The artifact relocates Jackson, the OpenLineage model, Apache HttpClient, and the commons-logging
+bridge under `org.apache.seatunnel.lineage.shaded`. That matters because `lib/` is on the parent
+class loader, so anything placed there is visible to every job running on that cluster; relocation
+keeps this artifact from changing which Jackson those jobs see. Do not substitute the SeaTunnel
+starter jar, which carries the same libraries unrelocated.
+
+Keep the same cluster configuration in both configuration-file layouts when an installation supports
+both Flink 1.20+ and legacy deployments.
 
 ## Events and dataset names
 
@@ -178,13 +195,13 @@ still emitted.
    Checkpoint heartbeats do not extend the receiver's second, seven-day absolute lifetime limit for
    an uncompleted run. A continuously running run can still be marked `ABANDONED` after seven days;
    a later terminal event can replace that inferred state.
-5. The Flink lineage JARs must be installed in the JobManager's `lib/` directory, and **a job with
-   lineage enabled fails to submit if they are not**. The status hook is a structural field of the
+5. `seatunnel-lineage-flink-<version>-shaded.jar` must be installed in the JobManager's `lib/`
+   directory, and **a job with lineage enabled fails to submit if it is not**. The status hook is a structural field of the
    JobGraph, so the JobManager deserializes it with the system class loader before any user class
    loader exists; shipping the classes in the submitted job jar does not help. This is deliberate —
    a job that silently loses its lineage is worse than one that refuses to start — and the
    submission error names the missing class and how to resolve it. To submit without installing
-   them, set `openlineage_enabled=false`.
+   it, set `openlineage_enabled=false`.
    Flink 1.20+ uses `config.yaml`, while legacy deployments use `flink-conf.yaml`; configure the
    `openlineage.` values in the file layout used by each deployment. If both layouts are maintained,
    keep the corresponding configuration in both files.

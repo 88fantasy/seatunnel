@@ -21,6 +21,7 @@ import org.apache.seatunnel.api.common.JobContext;
 import org.apache.seatunnel.api.common.metrics.MetricNames;
 import org.apache.seatunnel.lineage.LineageConfig;
 import org.apache.seatunnel.lineage.LineageDataset;
+import org.apache.seatunnel.lineage.flink.LineageJobStatusHook;
 
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.JobID;
@@ -176,7 +177,7 @@ class FlinkLineageSupportTest {
      */
     @Test
     void explainsAJobManagerThatCannotLoadTheStatusHook() {
-        String hookClass = FlinkLineageSupport.class.getName() + "$JobStatusHookInvocationHandler";
+        String hookClass = LineageJobStatusHook.class.getName();
         Exception submissionFailure =
                 new RuntimeException(
                         "Failed to submit JobGraph.",
@@ -188,6 +189,8 @@ class FlinkLineageSupportTest {
 
         Assertions.assertNotNull(hint);
         Assertions.assertTrue(hint.contains("$FLINK_HOME/lib"), "must say where to install it");
+        Assertions.assertTrue(
+                hint.contains("seatunnel-lineage-flink"), "must name the artifact to install");
         Assertions.assertTrue(
                 hint.contains("openlineage_enabled=false"),
                 "must offer a way to submit without it");

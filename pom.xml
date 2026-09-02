@@ -43,6 +43,7 @@
         <module>seatunnel-common</module>
         <module>seatunnel-lineage</module>
         <module>seatunnel-lineage-openlineage</module>
+        <module>seatunnel-lineage-flink</module>
         <module>seatunnel-core</module>
         <module>seatunnel-transforms-v2</module>
         <module>seatunnel-connectors-v2</module>
