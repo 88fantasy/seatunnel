@@ -88,6 +88,7 @@ import org.apache.seatunnel.engine.server.resourcemanager.resource.SlotProfile;
 import org.apache.seatunnel.engine.server.task.operation.CleanTaskGroupContextOperation;
 import org.apache.seatunnel.engine.server.task.operation.GetTaskGroupMetricsOperation;
 import org.apache.seatunnel.engine.server.utils.NodeEngineUtil;
+import org.apache.seatunnel.lineage.LineageConfig;
 
 import com.hazelcast.cluster.Address;
 import com.hazelcast.core.HazelcastInstanceNotActiveException;
@@ -109,6 +110,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -151,6 +153,8 @@ public class JobMaster {
 
     private long initializationTimestamp;
 
+    private boolean restart;
+
     private LogicalDag logicalDag;
 
     private volatile JobDAGInfo jobDAGInfo;
@@ -177,6 +181,8 @@ public class JobMaster {
     private Map<Integer, CheckpointPlan> checkpointPlanMap;
 
     private final Map<Integer, List<SlotProfile>> releasedSlotWhenTaskGroupFinished;
+
+    private final Map<Integer, AtomicLong> lineageHeartbeatTimes = new ConcurrentHashMap<>();
 
     private final IMap<Long, JobInfo> runningJobInfoIMap;
 
@@ -229,6 +235,7 @@ public class JobMaster {
 
     public synchronized void init(long initializationTimestamp, boolean restart) throws Exception {
         this.initializationTimestamp = initializationTimestamp;
+        this.restart = restart;
         jobImmutableInformation =
                 nodeEngine.getSerializationService().toObject(jobImmutableInformationData);
         jobCheckpointConfig =
@@ -1007,6 +1014,97 @@ public class JobMaster {
 
     public CheckpointManager getCheckpointManager() {
         return checkpointManager;
+    }
+
+    /**
+     * Returns the restored logical DAG used to build this job's physical execution plan.
+     *
+     * @return logical DAG, or {@code null} before job initialization
+     */
+    public LogicalDag getLogicalDag() {
+        return logicalDag;
+    }
+
+    /**
+     * Returns the history service used to read terminal job metrics.
+     *
+     * @return job history service
+     */
+    public JobHistoryService getJobHistoryService() {
+        return jobHistoryService;
+    }
+
+    /**
+     * Resolves job lineage settings from the job, environment, and cluster configuration.
+     *
+     * <p>A local or test-created {@code JobMaster} can have no engine configuration. In that case
+     * the cluster layer is treated as empty and the lineage defaults remain disabled.
+     *
+     * @return resolved lineage configuration
+     */
+    public LineageConfig resolveLineageConfig() {
+        Map<String, Object> clusterOptions =
+                engineConfig == null || engineConfig.getLineageOptions() == null
+                        ? Collections.emptyMap()
+                        : engineConfig.getLineageOptions();
+        return LineageConfig.resolve(
+                jobImmutableInformation.getJobConfig().getEnvOptions(),
+                clusterOptions,
+                System.getenv());
+    }
+
+    /**
+     * Returns the lineage attempt discriminator for this job master lifecycle.
+     *
+     * <p>Fresh submissions retain the original run identity. Engine restarts and savepoint or
+     * checkpoint restores receive distinct prefixes, so each lifecycle is represented as a separate
+     * OpenLineage run.
+     *
+     * <p>The discriminator is derived from {@code initializationTimestamp} rather than from a
+     * random value on purpose: the run ID must stay recomputable from job facts alone, so that an
+     * operator can derive it offline and query the receiver for that run. A random attempt would
+     * make the run ID observable only in the emitted events themselves.
+     *
+     * @return attempt discriminator, or {@code null} for a fresh submission
+     */
+    public String getLineageAttempt() {
+        if (restart) {
+            return "restart-" + initializationTimestamp;
+        }
+        if (jobImmutableInformation != null && jobImmutableInformation.isRestoreJob()) {
+            return "restore-"
+                    + jobImmutableInformation.getRestoreMode().name().toLowerCase(Locale.ROOT)
+                    + "-"
+                    + initializationTimestamp;
+        }
+        return null;
+    }
+
+    /**
+     * Reports a checkpoint-triggered lineage heartbeat for a streaming pipeline.
+     *
+     * @param pipelineId completed checkpoint pipeline identifier
+     */
+    public void reportLineageHeartbeat(int pipelineId) {
+        ZetaLineageReporter.reportHeartbeat(this, pipelineId);
+    }
+
+    /**
+     * Returns the current cumulative metrics collected from active task groups for lineage
+     * heartbeats.
+     *
+     * <p>Terminal events use the finished history copy because task groups may already have been
+     * cleaned up. Heartbeats are emitted while the task groups are active and therefore read the
+     * current counters.
+     *
+     * @return current cumulative job metrics
+     */
+    public JobMetrics getCurrentJobMetricsForLineage() {
+        return JobMetricsUtil.toJobMetrics(getCurrJobMetrics());
+    }
+
+    Map<Integer, AtomicLong> getLineageHeartbeatTimes() {
+        return lineageHeartbeatTimes;
     }
 
     public PassiveCompletableFuture<JobResult> getJobMasterCompleteFuture() {

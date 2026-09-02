@@ -134,7 +134,8 @@ public class ImportClassCheckTest {
                                 "org.apache.seatunnel.format.compatible.debezium.json",
                                 "org.apache.seatunnel.format.compatible.kafka.connect.json",
                                 "org.apache.seatunnel.connectors.druid.sink",
-                                "org.apache.seatunnel.connectors.seatunnel.typesense.client"));
+                                "org.apache.seatunnel.connectors.seatunnel.typesense.client",
+                                "org.apache.seatunnel.lineage.openlineage"));
         Assertions.assertEquals(0, errorMap.size(), shadeErrorMsg("jackson", errorMap));
         log.info("check jackson shade successfully");
     }

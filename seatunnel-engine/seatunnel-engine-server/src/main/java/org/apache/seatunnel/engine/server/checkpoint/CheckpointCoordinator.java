@@ -1370,6 +1370,7 @@ public class CheckpointCoordinator {
         if (!notifyCompleted(completedCheckpoint)) {
             return;
         }
+        checkpointManager.reportLineageHeartbeat(pipelineId);
         PendingCheckpoint pendingCheckpoint = pendingCheckpoints.remove(checkpointId);
         if (pendingCheckpoint != null) {
             pendingCheckpoint.abortCheckpointTimeoutFutureWhenIsCompleted();

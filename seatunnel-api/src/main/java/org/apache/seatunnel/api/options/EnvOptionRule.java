@@ -50,7 +50,18 @@ public class EnvOptionRule implements Factory {
                         MultiTableCommonOptions.MULTI_TABLE_FAILURE_POLICY,
                         EnvCommonOptions.CUSTOM_PARAMETERS,
                         EnvCommonOptions.NODE_TAG_FILTER,
-                        EnvCommonOptions.SINK_FLUSH_INTERVAL)
+                        EnvCommonOptions.SINK_FLUSH_INTERVAL,
+                        EnvCommonOptions.OPENLINEAGE_ENABLED,
+                        EnvCommonOptions.OPENLINEAGE_TRANSPORT,
+                        EnvCommonOptions.OPENLINEAGE_URL,
+                        EnvCommonOptions.OPENLINEAGE_NAMESPACE,
+                        EnvCommonOptions.OPENLINEAGE_AUTH_TOKEN,
+                        EnvCommonOptions.OPENLINEAGE_TIMEOUT_MS,
+                        EnvCommonOptions.OPENLINEAGE_RETRY_TIMES,
+                        EnvCommonOptions.OPENLINEAGE_RUN_FACET,
+                        EnvCommonOptions.OPENLINEAGE_RUN_PROPERTIES,
+                        EnvCommonOptions.OPENLINEAGE_HEARTBEAT_MIN_INTERVAL_MS,
+                        EnvCommonOptions.OPENLINEAGE_PRODUCER)
                 .build();
     }
 }
