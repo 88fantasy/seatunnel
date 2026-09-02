@@ -17,6 +17,7 @@
 
 package org.apache.seatunnel.lineage;
 
+import java.lang.ref.WeakReference;
 import java.util.ServiceLoader;
 
 /** Loads the backend selected by the immutable lineage configuration. */
@@ -29,8 +30,7 @@ public final class LineageBackendLoader {
      * The two callers that matter are on latency-sensitive engine paths, where that scan is pure
      * overhead: a process reports lineage through one transport loaded by one class loader, so the
      * same answer comes back every time. A single entry is enough to remove the repeat scan while
-     * keeping the loader identity part of the answer, and it bounds the class loader reference this
-     * class can hold to one.
+     * keeping the loader identity part of the answer.
      */
     private static volatile Resolution resolution;
 
@@ -48,7 +48,9 @@ public final class LineageBackendLoader {
         }
         for (LineageBackend candidate : ServiceLoader.load(LineageBackend.class, loader)) {
             if (config.transport().equalsIgnoreCase(candidate.getName())) {
-                resolution = new Resolution(loader, config.transport(), candidate);
+                if (isLoadedWithThisClass(candidate)) {
+                    resolution = new Resolution(loader, config.transport(), candidate);
+                }
                 return candidate;
             }
         }
@@ -56,19 +58,40 @@ public final class LineageBackendLoader {
                 "No LineageBackend is registered for transport " + config.transport());
     }
 
+    /**
+     * Returns whether caching the backend can extend nothing's lifetime.
+     *
+     * <p>A cached backend keeps its class, and therefore its class loader, reachable from a static
+     * field. That is free when the backend comes from the same place as this class, which is the
+     * case for both deployments that matter: the engine server jar on Zeta, and the shaded artifact
+     * in the Flink cluster's lib/. It is not free when the context class loader resolves a copy
+     * shipped inside a job's own jar, where caching would pin that job's class loader for the life
+     * of the process. Those resolutions are simply not cached, which is the behaviour that existed
+     * before the cache.
+     */
+    private static boolean isLoadedWithThisClass(LineageBackend backend) {
+        return backend.getClass().getClassLoader() == LineageBackendLoader.class.getClassLoader();
+    }
+
     private static final class Resolution {
-        private final ClassLoader loader;
+        /**
+         * Weak so that remembering which loader produced this answer cannot, on its own, keep that
+         * loader alive; a collected reference simply misses and the lookup runs again.
+         */
+        private final WeakReference<ClassLoader> loader;
+
         private final String transport;
         private final LineageBackend backend;
 
         private Resolution(ClassLoader loader, String transport, LineageBackend backend) {
-            this.loader = loader;
+            this.loader = new WeakReference<>(loader);
             this.transport = transport;
             this.backend = backend;
         }
 
         private boolean matches(ClassLoader candidateLoader, String candidateTransport) {
-            return loader == candidateLoader && transport.equalsIgnoreCase(candidateTransport);
+            return loader.get() == candidateLoader
+                    && transport.equalsIgnoreCase(candidateTransport);
         }
     }
 }

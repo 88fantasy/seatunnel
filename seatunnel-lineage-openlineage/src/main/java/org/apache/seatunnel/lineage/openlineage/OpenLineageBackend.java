@@ -152,9 +152,21 @@ public final class OpenLineageBackend implements LineageBackend {
      * which on the engine paths that emit lineage costs more than the request itself. Timeouts stay
      * per request through {@link RequestConfig}, so one client can serve every configuration. It is
      * intentionally never closed: it lives as long as the process that reports lineage.
+     *
+     * <p>The connection limits are set explicitly because the default pool allows two connections
+     * per route, and every lineage event of a process goes to the same receiver, hence the same
+     * route. Sharing a client at that default would let a third concurrent emitter — a Zeta master
+     * running several streaming jobs reports each job's events on its own thread — wait out the
+     * connection-request timeout and fail against a receiver that is perfectly healthy.
      */
     private static final class SharedClient {
-        private static final CloseableHttpClient INSTANCE = HttpClients.createDefault();
+        private static final int MAX_CONNECTIONS = 32;
+
+        private static final CloseableHttpClient INSTANCE =
+                HttpClients.custom()
+                        .setMaxConnPerRoute(MAX_CONNECTIONS)
+                        .setMaxConnTotal(MAX_CONNECTIONS)
+                        .build();
 
         private SharedClient() {}
     }
