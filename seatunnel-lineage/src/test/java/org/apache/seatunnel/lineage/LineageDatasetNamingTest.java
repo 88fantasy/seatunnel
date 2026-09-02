@@ -144,4 +144,36 @@ class LineageDatasetNamingTest {
 
         assertEquals(0, LineageDatasetFactory.fromConnectorOptions(options).size());
     }
+
+    /**
+     * A multi-table sink routes rows with a template that is substituted per row, so the template
+     * itself is never a real table. Emitting it would collapse every placeholder-routed job onto
+     * one shared graph node whose name looks plausible.
+     */
+    @Test
+    void rejectsUnresolvedPlaceholdersInTableIdentity() {
+        assertFalse(LineageDatasetNaming.paimon("catalog", "db", "${table_name}").isPresent());
+        assertFalse(
+                LineageDatasetNaming.paimon("catalog", "${database_name}", "orders").isPresent());
+        assertFalse(LineageDatasetNaming.paimon("${catalog}", "db", "orders").isPresent());
+        assertFalse(
+                LineageDatasetNaming.doris("fe.example", 9030, "db", "${table_name}").isPresent());
+        assertFalse(
+                LineageDatasetNaming.jdbc("mysql", "host", 3306, "db", "${table_name}")
+                        .isPresent());
+
+        // A name that merely contains a dollar sign is a legal identifier and must still pass.
+        assertTrue(LineageDatasetNaming.paimon("catalog", "db", "orders$archive").isPresent());
+    }
+
+    @Test
+    void placeholderRoutedSinkYieldsNoDatasetThroughTheFactory() {
+        Map<String, Object> options = new HashMap<>();
+        options.put("plugin_name", "Paimon");
+        options.put("catalog_name", "paimon_s3");
+        options.put("database", "${database_name}");
+        options.put("table", "${table_name}");
+
+        assertEquals(0, LineageDatasetFactory.fromConnectorOptions(options).size());
+    }
 }

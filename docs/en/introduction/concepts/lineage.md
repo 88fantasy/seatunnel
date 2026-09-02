@@ -157,6 +157,12 @@ across jobs; when it is omitted, no Paimon dataset is emitted. For Doris, `fenod
 lineage namespace uses the Doris query port instead. The generic `default.default.default` table path
 is not emitted.
 
+A sink that routes rows with a template, such as `table = "${table_name}"`, produces no dataset
+either. The template is substituted per row at write time, so it never names a real table, and
+emitting it verbatim would collapse every template-routed job onto one shared node in the graph. A
+name that merely contains a dollar sign, such as `orders$archive`, is a normal identifier and is
+still emitted.
+
 ## Known limitations
 
 1. Zeta and Flink use different output-count semantics. Zeta prefers `committed` values and falls

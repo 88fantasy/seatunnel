@@ -146,6 +146,10 @@ Paimon 数据集。Doris 的 `fenodes` 通常是 HTTP Stream Load
 端口，而血缘 namespace 使用 Doris query port。通用的 `default.default.default` 表路径不会
 被发射。
 
+使用模板路由的 sink（例如 `table = "${table_name}"`）同样不会产生数据集。模板在写入时按行替换，
+本身从不指向真实的表；若原样发射，所有使用模板路由的作业会在血缘图上汇聚到同一个节点。仅仅
+包含美元符号的名称（例如 `orders$archive`）是正常标识符，仍会被发射。
+
 ## 已知限制
 
 1. 两个引擎的输出计数口径不同。Zeta 优先使用 `committed`，必要时回退到 `attempted`；Flink
