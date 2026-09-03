@@ -62,8 +62,9 @@ public final class RecordingLineageBackend implements LineageBackend {
     @Override
     public void emit(LineageConfig config, LineageEvent event) {
         CountDownLatch release = HEARTBEAT_RELEASE;
-        if (release != null && event.eventType() == LineageEventType.RUNNING) {
-            HEARTBEAT_ENTERED.countDown();
+        CountDownLatch entered = HEARTBEAT_ENTERED;
+        if (release != null && entered != null && event.eventType() == LineageEventType.RUNNING) {
+            entered.countDown();
             try {
                 release.await();
             } catch (InterruptedException interrupted) {

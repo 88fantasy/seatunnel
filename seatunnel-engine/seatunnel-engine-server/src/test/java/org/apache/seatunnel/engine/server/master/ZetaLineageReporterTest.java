@@ -38,6 +38,7 @@ import org.apache.seatunnel.lineage.LineageEventType;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -173,12 +174,6 @@ class ZetaLineageReporterTest {
     }
 
     /**
-     * Emission blocks on an HTTP request whose worst case is the configured timeout times one more
-     * than the retry count. Its callers hold a completed checkpoint and the physical plan monitor,
-     * so the send has to leave the calling thread; it must still reach the receiver in submission
-     * order, because a COMPLETE that overtakes its own START leaves the run in the wrong state.
-     */
-    /**
      * A non-positive interval disables the heartbeat, matching what the option means on Flink. Zeta
      * reports from the checkpoint completion callback, so reading zero as "always overdue" would
      * turn the value that switches heartbeats off into one metrics RPC and one HTTP request per
@@ -199,6 +194,32 @@ class ZetaLineageReporterTest {
         ZetaLineageReporter.reportHeartbeat(reporting, 1);
 
         verify(reporting).submitLineageEmission(any());
+    }
+
+    /**
+     * The heartbeat leaves the checkpoint thread through a queue, while the terminal event is
+     * submitted from the plan thread. A heartbeat that passed its own end-state check just before
+     * the job finished would otherwise be drained after the terminal event and leave the run marked
+     * running forever.
+     */
+    @Test
+    void shouldDropAHeartbeatThatLostTheRaceWithTheTerminalEvent() {
+        JobMaster jobMaster = streamingJobMaster(1L);
+        ArgumentCaptor<Runnable> emission = ArgumentCaptor.forClass(Runnable.class);
+
+        ZetaLineageReporter.reportHeartbeat(jobMaster, 1);
+        verify(jobMaster).submitLineageEmission(emission.capture());
+
+        // The plan thread reached the end state after the heartbeat passed its own check.
+        doReturn(JobStatus.FINISHED).when(jobMaster).getJobStatus();
+        emission.getValue().run();
+        verify(jobMaster, never()).getLogicalDag();
+
+        // The same queued emission on a job that is still running does build its events, so the
+        // assertion above cannot pass merely because the emission does nothing.
+        doReturn(JobStatus.RUNNING).when(jobMaster).getJobStatus();
+        emission.getValue().run();
+        verify(jobMaster).getLogicalDag();
     }
 
     /**
@@ -227,6 +248,12 @@ class ZetaLineageReporterTest {
         return jobMaster;
     }
 
+    /**
+     * Emission blocks on an HTTP request whose worst case is the configured timeout times one more
+     * than the retry count. Its callers hold a completed checkpoint and the physical plan monitor,
+     * so the send has to leave the calling thread; it must still reach the receiver in submission
+     * order, because a COMPLETE that overtakes its own START leaves the run in the wrong state.
+     */
     @Test
     void shouldRunLineageEmissionsOffTheCallerThreadInSubmissionOrder() throws Exception {
         JobMaster jobMaster = mock(JobMaster.class, CALLS_REAL_METHODS);

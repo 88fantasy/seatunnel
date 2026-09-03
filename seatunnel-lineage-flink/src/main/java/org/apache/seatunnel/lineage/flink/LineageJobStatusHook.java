@@ -185,8 +185,9 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
      * allow. Such a RUNNING could reach the receiver after the terminal event and leave the run
      * marked running forever, which is the failure the heartbeat exists to prevent. Claiming the
      * emit monitor therefore both publishes the terminal flag, which suppresses any heartbeat that
-     * has not started sending, and waits out one that has. The wait is bounded by the same timeout
-     * as a single terminal send, and only ever happens on a job that is already finishing.
+     * has not started sending, and waits out one that has. Because the monitor is claimed one event
+     * at a time, the wait is bounded by a single send rather than by the whole run set, and only
+     * ever happens on a job that is already finishing.
      */
     private void stopHeartbeat() {
         ScheduledFuture<?> scheduled = heartbeat;
@@ -221,30 +222,32 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
     /**
      * Sends one lifecycle event for every run this hook owns.
      *
-     * <p>Emissions are serialized so that a terminal event never overtakes a heartbeat that is
-     * already being sent, and so that a heartbeat which was waiting for the monitor sees the
-     * terminal flag and sends nothing. See {@link #stopHeartbeat()}.
+     * <p>Each send is serialized against the others, so a terminal event never overtakes a
+     * heartbeat that is already being sent, and a heartbeat that was waiting for the monitor sees
+     * the terminal flag and stops. See {@link #stopHeartbeat()}.
      */
     private void emit(LineageEventType eventType, String flinkJobId) {
-        synchronized (this) {
-            if (eventType == LineageEventType.RUNNING && terminal) {
-                return;
-            }
-            send(eventType, flinkJobId);
-        }
-    }
-
-    private void send(LineageEventType eventType, String flinkJobId) {
         try {
             LineageConfig runtimeConfig =
                     config.withAuthToken(
                             LineageConfig.resolveToken(
                                     FlinkClusterOptions.load(), System.getenv()));
             for (LineageEvent event : events) {
-                LineageRuntime.emit(
-                        runtimeConfig,
-                        event.withEventType(eventType)
-                                .withRunProperty(FLINK_JOB_ID_PROPERTY, flinkJobId));
+                // Claimed per event rather than around the whole loop: a job with many sink
+                // tables sends one event per output dataset, and holding the monitor across all
+                // of them would make a terminal callback wait out every one of them.
+                synchronized (this) {
+                    if (eventType == LineageEventType.RUNNING && terminal) {
+                        // The terminal event owns this run from here on. Abandoning the rest of
+                        // the loop is safe: whatever the terminal callback sends covers every
+                        // run this hook owns.
+                        return;
+                    }
+                    LineageRuntime.emit(
+                            runtimeConfig,
+                            event.withEventType(eventType)
+                                    .withRunProperty(FLINK_JOB_ID_PROPERTY, flinkJobId));
+                }
             }
         } catch (Throwable error) {
             LOGGER.warn("Failed to emit Flink lineage status event", error);

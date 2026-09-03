@@ -184,6 +184,18 @@ class FlinkLineageSupportTest {
                 FlinkLineageSupport.describeMissingHookClass(
                         new IllegalStateException("Recovery is suppressed")));
         Assertions.assertNull(FlinkLineageSupport.describeMissingHookClass(null));
+        // A relayed trace can name several failures at once. The hook class must be the one that
+        // could not be loaded; a different missing class in the same text is a different problem,
+        // and the caller reports this hint as the top-level failure message.
+        Assertions.assertNull(
+                FlinkLineageSupport.describeMissingHookClass(
+                        new IllegalStateException(
+                                "[Internal server error., <Exception on server side:"
+                                        + " java.lang.ClassNotFoundException:"
+                                        + " com.example.SomeConnector at"
+                                        + " JobSubmitHandler.loadJobGraph; JobGraph hooks: ["
+                                        + LineageJobStatusHook.class.getName()
+                                        + "]>]")));
         // Naming the hook class is not enough on its own: only a class-loading failure means the
         // artifact is missing from the JobManager.
         Assertions.assertNull(

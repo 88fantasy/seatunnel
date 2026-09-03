@@ -260,9 +260,9 @@ public final class FlinkLineageSupport {
      * the deployment this exists for is a session cluster submitted over REST: there the
      * JobManager-side failure never crosses the wire as an exception object. The client sees a
      * {@code RestClientException} whose message carries the server-side stack trace as text, so a
-     * type check alone would never match. The message must name both the hook class and a
-     * class-loading failure, so an unrelated failure that merely mentions the class is not
-     * misreported as a missing deployment.
+     * type check alone would never match. The message must report the hook class as the one that
+     * could not be loaded, so neither an unrelated failure that mentions the class nor an unrelated
+     * missing class in the same trace is misreported as a missing deployment.
      *
      * @param failure the exception thrown by job submission
      * @return an explanatory message, or {@code null} when the failure is unrelated to lineage
@@ -275,7 +275,7 @@ public final class FlinkLineageSupport {
             if (message == null || !message.contains(HOOK_HANDLER_CLASS)) {
                 continue;
             }
-            if (!isClassLoadingFailure(current, message)) {
+            if (!reportsUnloadableHookClass(current, message)) {
                 continue;
             }
             return "Execute Flink job error: lineage reporting is enabled, but the JobManager"
@@ -292,14 +292,26 @@ public final class FlinkLineageSupport {
     }
 
     /**
-     * Returns whether a link in the cause chain reports a class-loading failure, either as the
-     * exception type or, for a failure relayed as text across the REST boundary, in its message.
+     * Returns whether a link in the cause chain reports that the hook class could not be loaded,
+     * either as the exception type or, for a failure relayed as text across the REST boundary, in
+     * its message.
+     *
+     * <p>A relayed message carries a whole server-side stack trace, which can name several failures
+     * at once. The class-loading failure and the hook class must therefore appear as one {@code
+     * Throwable.toString()} pair rather than merely somewhere in the same text; otherwise a
+     * submission that failed over an unrelated missing class would be reported as a missing lineage
+     * deployment, and the caller replaces the top-level message with that explanation.
      */
-    private static boolean isClassLoadingFailure(Throwable current, String message) {
-        return current instanceof ClassNotFoundException
-                || current instanceof NoClassDefFoundError
-                || message.contains(ClassNotFoundException.class.getName())
-                || message.contains(NoClassDefFoundError.class.getName());
+    private static boolean reportsUnloadableHookClass(Throwable current, String message) {
+        if (current instanceof ClassNotFoundException || current instanceof NoClassDefFoundError) {
+            return true;
+        }
+        String binaryName = HOOK_HANDLER_CLASS;
+        // NoClassDefFoundError names the class in internal form.
+        String internalName = HOOK_HANDLER_CLASS.replace('.', '/');
+        return message.contains(ClassNotFoundException.class.getName() + ": " + binaryName)
+                || message.contains(NoClassDefFoundError.class.getName() + ": " + binaryName)
+                || message.contains(NoClassDefFoundError.class.getName() + ": " + internalName);
     }
 
     /** Returns whether a completed result is attached and safe to use for output statistics. */

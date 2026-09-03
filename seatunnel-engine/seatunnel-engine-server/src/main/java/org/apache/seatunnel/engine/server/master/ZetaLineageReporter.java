@@ -127,6 +127,15 @@ public final class ZetaLineageReporter {
             jobMaster.submitLineageEmission(
                     () -> {
                         try {
+                            // Checked again here, not only above: the job can reach an end state
+                            // between the check above and this submission, and the terminal event
+                            // is submitted from the plan thread. Without this, a heartbeat that
+                            // lost that race is drained after the terminal event and leaves the
+                            // run marked running forever, which is what the heartbeat exists to
+                            // prevent.
+                            if (jobMaster.getJobStatus().isEndState()) {
+                                return;
+                            }
                             emit(
                                     config,
                                     events(jobMaster, config, LineageEventType.RUNNING, true),
