@@ -128,18 +128,18 @@ public final class LineageConfig implements Serializable {
         Map<String, ?> env = nonNull(environment);
         return new LineageConfig(
                 asBoolean(first(job, env, cluster, ENABLED), false),
-                asString(first(job, env, cluster, TRANSPORT), DEFAULT_TRANSPORT),
+                asString(first(job, env, cluster, TRANSPORT), TRANSPORT, DEFAULT_TRANSPORT),
                 asNullableString(first(job, env, cluster, URL)),
-                asString(first(job, env, cluster, NAMESPACE), DEFAULT_NAMESPACE),
+                asString(first(job, env, cluster, NAMESPACE), NAMESPACE, DEFAULT_NAMESPACE),
                 asToken(env, cluster),
                 asInt(first(job, env, cluster, TIMEOUT_MS), DEFAULT_TIMEOUT_MS),
                 asInt(first(job, env, cluster, RETRY_TIMES), DEFAULT_RETRY_TIMES),
-                asString(first(job, env, cluster, RUN_FACET), DEFAULT_RUN_FACET),
+                asString(first(job, env, cluster, RUN_FACET), RUN_FACET, DEFAULT_RUN_FACET),
                 resolveRunProperties(job, env, cluster),
                 asLong(
                         first(job, env, cluster, HEARTBEAT_MIN_INTERVAL_MS),
                         DEFAULT_HEARTBEAT_MIN_INTERVAL_MS),
-                asString(first(job, env, cluster, PRODUCER), defaultProducer()));
+                asString(first(job, env, cluster, PRODUCER), PRODUCER, defaultProducer()));
     }
 
     /** Resolves lineage configuration using only cluster-level options and defaults. */
@@ -355,9 +355,9 @@ public final class LineageConfig implements Serializable {
                 : fallback;
     }
 
-    private static String asString(Lookup value, String fallback) {
+    private static String asString(Lookup value, String key, String fallback) {
         return value.present && value.value != null
-                ? requireText(String.valueOf(value.value), "lineage option")
+                ? requireText(String.valueOf(value.value), key)
                 : fallback;
     }
 

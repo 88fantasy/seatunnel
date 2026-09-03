@@ -187,6 +187,9 @@ public class JobMaster {
 
     private final Map<Integer, AtomicLong> lineageHeartbeatTimes = new ConcurrentHashMap<>();
 
+    /** Resolved once on first use; see {@link #resolveLineageConfig()}. */
+    private volatile LineageConfig lineageConfig;
+
     /** Lineage emissions waiting to be sent; see {@link #submitLineageEmission(Runnable)}. */
     private final Deque<Runnable> lineageEmissions = new ArrayDeque<>();
 
@@ -1051,17 +1054,29 @@ public class JobMaster {
      * <p>A local or test-created {@code JobMaster} can have no engine configuration. In that case
      * the cluster layer is treated as empty and the lineage defaults remain disabled.
      *
+     * <p>The result is cached because this is reached from the checkpoint completion callback,
+     * where resolving repeats several map probes and allocations per option for what is a constant:
+     * none of the three layers change over a job master's lifetime. Two callers racing the first
+     * resolution both get an equivalent configuration, so no locking is needed.
+     *
      * @return resolved lineage configuration
      */
     public LineageConfig resolveLineageConfig() {
+        LineageConfig resolved = lineageConfig;
+        if (resolved != null) {
+            return resolved;
+        }
         Map<String, Object> clusterOptions =
                 engineConfig == null || engineConfig.getLineageOptions() == null
                         ? Collections.emptyMap()
                         : engineConfig.getLineageOptions();
-        return LineageConfig.resolve(
-                jobImmutableInformation.getJobConfig().getEnvOptions(),
-                clusterOptions,
-                System.getenv());
+        resolved =
+                LineageConfig.resolve(
+                        jobImmutableInformation.getJobConfig().getEnvOptions(),
+                        clusterOptions,
+                        System.getenv());
+        lineageConfig = resolved;
+        return resolved;
     }
 
     /**

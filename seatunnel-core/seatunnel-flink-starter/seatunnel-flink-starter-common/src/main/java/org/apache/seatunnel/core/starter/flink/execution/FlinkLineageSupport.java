@@ -131,11 +131,26 @@ public final class FlinkLineageSupport {
             List<LineageDataset> outputs,
             String jobName) {
         try {
-            if (config == null || !config.enabled() || outputs == null || outputs.isEmpty()) {
+            if (config == null || !config.enabled()) {
+                return null;
+            }
+            if (outputs == null || outputs.isEmpty()) {
+                // Reporting is enabled, so producing nothing is a result the operator needs to
+                // see; otherwise a job whose sinks resolved to no dataset looks identical to a
+                // working one that simply has no lineage yet.
+                LOGGER.info(
+                        "No lineage events built for job {}: none of its sinks resolved to a"
+                                + " supported dataset",
+                        jobName);
                 return null;
             }
             Method registerHook = findJobStatusHookMethod();
             if (registerHook == null) {
+                LOGGER.warn(
+                        "Lineage reporting is enabled but the running Flink version does not"
+                                + " expose the job status hook API, which requires Flink 1.16 or"
+                                + " later. No lineage events will be reported for job {}.",
+                        jobName);
                 return null;
             }
             List<LineageEvent> events = createEvents(config, jobContext, inputs, outputs, jobName);
@@ -241,6 +256,14 @@ public final class FlinkLineageSupport {
      * <p>Failing the submission is intended: a job that silently loses its lineage is worse than
      * one that refuses to start. This only makes the reason actionable.
      *
+     * <p>The failure is recognised from the message rather than from the exception type, because
+     * the deployment this exists for is a session cluster submitted over REST: there the
+     * JobManager-side failure never crosses the wire as an exception object. The client sees a
+     * {@code RestClientException} whose message carries the server-side stack trace as text, so a
+     * type check alone would never match. The message must name both the hook class and a
+     * class-loading failure, so an unrelated failure that merely mentions the class is not
+     * misreported as a missing deployment.
+     *
      * @param failure the exception thrown by job submission
      * @return an explanatory message, or {@code null} when the failure is unrelated to lineage
      */
@@ -252,8 +275,7 @@ public final class FlinkLineageSupport {
             if (message == null || !message.contains(HOOK_HANDLER_CLASS)) {
                 continue;
             }
-            if (!(current instanceof ClassNotFoundException)
-                    && !(current instanceof NoClassDefFoundError)) {
+            if (!isClassLoadingFailure(current, message)) {
                 continue;
             }
             return "Execute Flink job error: lineage reporting is enabled, but the JobManager"
@@ -267,6 +289,17 @@ public final class FlinkLineageSupport {
                     + " openlineage_enabled=false to submit without lineage.";
         }
         return null;
+    }
+
+    /**
+     * Returns whether a link in the cause chain reports a class-loading failure, either as the
+     * exception type or, for a failure relayed as text across the REST boundary, in its message.
+     */
+    private static boolean isClassLoadingFailure(Throwable current, String message) {
+        return current instanceof ClassNotFoundException
+                || current instanceof NoClassDefFoundError
+                || message.contains(ClassNotFoundException.class.getName())
+                || message.contains(NoClassDefFoundError.class.getName());
     }
 
     /** Returns whether a completed result is attached and safe to use for output statistics. */

@@ -26,6 +26,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LineageConfigTest {
 
@@ -128,6 +129,26 @@ class LineageConfigTest {
 
         assertEquals("platform", config.runProperties().get("owner"));
         assertEquals("cn", config.runProperties().get("region"));
+    }
+
+    /**
+     * The five string options share one validation path, so an unnamed error leaves the operator
+     * guessing which of them was blanked out.
+     */
+    @Test
+    void namesTheBlankOptionItRejects() {
+        Map<String, Object> cluster = Collections.singletonMap(LineageConfig.NAMESPACE, "  ");
+
+        IllegalArgumentException failure =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () ->
+                                LineageConfig.resolve(
+                                        Collections.emptyMap(), cluster, Collections.emptyMap()));
+
+        assertTrue(
+                failure.getMessage().contains(LineageConfig.NAMESPACE),
+                "the error must name the option at fault, was: " + failure.getMessage());
     }
 
     @Test

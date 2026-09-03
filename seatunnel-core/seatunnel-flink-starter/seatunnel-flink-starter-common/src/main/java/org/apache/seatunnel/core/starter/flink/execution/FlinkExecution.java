@@ -117,6 +117,13 @@ public class FlinkExecution implements TaskExecution {
             resolvedLineageConfig = candidateLineageConfig;
             resolvedLineageInputs = collectLineageDatasets(config.getConfigList(Constants.SOURCE));
             resolvedLineageOutputs = collectLineageDatasets(config.getConfigList(Constants.SINK));
+        } else if (candidateLineageConfig.enabled()) {
+            // Reporting was asked for and will not happen, which the operator cannot otherwise
+            // tell apart from a working setup that has not reported yet.
+            LOGGER.warn(
+                    "Lineage reporting is enabled but this Flink starter does not support it;"
+                            + " the status hook API requires Flink 1.16 or later, so use the"
+                            + " flink-20-starter. No lineage events will be reported for this job.");
         }
         this.lineageConfig = resolvedLineageConfig;
         this.lineageInputs = resolvedLineageInputs;

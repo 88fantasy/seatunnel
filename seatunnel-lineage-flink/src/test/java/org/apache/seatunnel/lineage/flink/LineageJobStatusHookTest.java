@@ -38,6 +38,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 class LineageJobStatusHookTest {
 
@@ -273,6 +275,64 @@ class LineageJobStatusHookTest {
         Assertions.assertTrue(
                 RecordingLineageBackend.EVENTS.isEmpty(),
                 "a zero interval must not emit heartbeats");
+    }
+
+    /**
+     * Cancelling the scheduled heartbeat does not stop one that is already sending, and a send
+     * blocks for as long as the receiver's timeout and retries allow. Without ordering, that
+     * in-flight RUNNING reaches the receiver after the terminal event and leaves the run marked
+     * running forever, which is the state the heartbeat exists to prevent.
+     */
+    @Test
+    void keepsAnInFlightHeartbeatFromOvertakingTheTerminalEvent() throws Throwable {
+        RecordingLineageBackend.HEARTBEAT_ENTERED = new CountDownLatch(1);
+        RecordingLineageBackend.HEARTBEAT_RELEASE = new CountDownLatch(1);
+        InvocationHandler hook =
+                new LineageJobStatusHook(
+                        config(null, 20L), Collections.singletonList(event()), false);
+
+        invoke(hook, "onCreated", "job-1");
+        Assertions.assertTrue(
+                RecordingLineageBackend.HEARTBEAT_ENTERED.await(5, TimeUnit.SECONDS),
+                "the heartbeat must have started sending");
+
+        CountDownLatch terminalReturned = new CountDownLatch(1);
+        Thread terminal =
+                new Thread(
+                        () -> {
+                            try {
+                                invoke(hook, "onCanceled", "job-1");
+                                terminalReturned.countDown();
+                            } catch (Throwable error) {
+                                throw new IllegalStateException(error);
+                            }
+                        });
+        terminal.start();
+
+        Assertions.assertFalse(
+                terminalReturned.await(300, TimeUnit.MILLISECONDS),
+                "the terminal event must wait for the heartbeat that is already sending");
+
+        RecordingLineageBackend.HEARTBEAT_RELEASE.countDown();
+        Assertions.assertTrue(
+                terminalReturned.await(5, TimeUnit.SECONDS), "the terminal event must be emitted");
+        terminal.join();
+
+        Assertions.assertEquals(
+                LineageEventType.RUNNING, RecordingLineageBackend.EVENTS.get(0).eventType());
+        Assertions.assertEquals(
+                LineageEventType.ABORT,
+                RecordingLineageBackend.EVENTS
+                        .get(RecordingLineageBackend.EVENTS.size() - 1)
+                        .eventType());
+
+        // Heartbeats scheduled while the terminal event was being sent must find the run closed.
+        int afterTerminal = RecordingLineageBackend.EVENTS.size();
+        Thread.sleep(300);
+        Assertions.assertEquals(
+                afterTerminal,
+                RecordingLineageBackend.EVENTS.size(),
+                "no heartbeat may follow the terminal event");
     }
 
     /** Calls a JobStatusHook callback the way the proxy does, by name. */

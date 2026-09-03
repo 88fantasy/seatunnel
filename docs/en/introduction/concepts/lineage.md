@@ -41,7 +41,7 @@ The following options are available in a job `env` block unless noted otherwise.
 | `openlineage_retry_times` | Int | `3` | Number of retries after a failed send. |
 | `openlineage_run_facet` | String | `seatunnel_properties` | Name of the custom run facet. |
 | `openlineage_run_properties` | Map | None | Custom properties copied to the run facet. |
-| `openlineage_heartbeat_min_interval_ms` | Long | `3600000` | Minimum interval between streaming-job heartbeat events, in milliseconds. |
+| `openlineage_heartbeat_min_interval_ms` | Long | `3600000` | Minimum interval between streaming-job heartbeat events, in milliseconds. `0` disables heartbeat reporting. |
 | `openlineage_producer` | String | `https://seatunnel.apache.org/<version>` | OpenLineage producer identifier. The default is derived from the running SeaTunnel version at runtime. |
 
 Values are resolved independently with this precedence:
@@ -199,7 +199,8 @@ still emitted.
    still-running job for one whose producer died. The two engines source them differently: Zeta
    emits from its checkpoint completion callback, so a Zeta job with checkpointing disabled has no
    heartbeat, while Flink emits from a scheduled task on the JobManager and therefore does not
-   depend on checkpointing. Both are throttled by `openlineage_heartbeat_min_interval_ms`. A run
+   depend on checkpointing. Both are throttled by `openlineage_heartbeat_min_interval_ms`, and both
+   stop reporting heartbeats when it is set to `0`. A run
    that does stop reporting is subject to the receiver's abandoned-run timeout, and the state
    inferred that way is replaced by a terminal event arriving later.
 5. `seatunnel-lineage-flink-<version>-shaded.jar` must be installed in the JobManager's `lib/`

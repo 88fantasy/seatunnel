@@ -17,11 +17,14 @@
 
 package org.apache.seatunnel.engine.server.master;
 
+import org.apache.seatunnel.api.common.JobContext;
 import org.apache.seatunnel.api.common.metrics.JobMetrics;
 import org.apache.seatunnel.api.common.metrics.Measurement;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.source.SeaTunnelSource;
+import org.apache.seatunnel.common.constants.JobMode;
 import org.apache.seatunnel.engine.common.config.JobConfig;
+import org.apache.seatunnel.engine.common.job.JobStatus;
 import org.apache.seatunnel.engine.core.dag.actions.SinkAction;
 import org.apache.seatunnel.engine.core.dag.actions.SourceAction;
 import org.apache.seatunnel.engine.core.dag.logical.LogicalDag;
@@ -53,7 +56,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -123,6 +128,10 @@ class ZetaLineageReporterTest {
         LineageConfig config = Assertions.assertDoesNotThrow(jobMaster::resolveLineageConfig);
 
         Assertions.assertFalse(config.enabled());
+        // Reached from the checkpoint completion callback, where none of the three configuration
+        // layers can have changed since the first resolution.
+        Assertions.assertSame(
+                config, jobMaster.resolveLineageConfig(), "the resolved config must be reused");
     }
 
     @Test
@@ -169,6 +178,55 @@ class ZetaLineageReporterTest {
      * so the send has to leave the calling thread; it must still reach the receiver in submission
      * order, because a COMPLETE that overtakes its own START leaves the run in the wrong state.
      */
+    /**
+     * A non-positive interval disables the heartbeat, matching what the option means on Flink. Zeta
+     * reports from the checkpoint completion callback, so reading zero as "always overdue" would
+     * turn the value that switches heartbeats off into one metrics RPC and one HTTP request per
+     * completed checkpoint.
+     */
+    @Test
+    void shouldNotReportHeartbeatsWhenTheIntervalDisablesThem() {
+        JobMaster disabled = streamingJobMaster(0L);
+
+        ZetaLineageReporter.reportHeartbeat(disabled, 1);
+
+        verify(disabled, never()).submitLineageEmission(any());
+
+        // The same wiring with a usable interval must report, so the assertion above cannot pass
+        // merely because the mock never reached the throttle.
+        JobMaster reporting = streamingJobMaster(1L);
+
+        ZetaLineageReporter.reportHeartbeat(reporting, 1);
+
+        verify(reporting).submitLineageEmission(any());
+    }
+
+    /**
+     * A running streaming job master whose lineage is enabled with the given heartbeat interval.
+     */
+    private static JobMaster streamingJobMaster(long heartbeatIntervalMs) {
+        JobMaster jobMaster = mock(JobMaster.class, CALLS_REAL_METHODS);
+        Map<String, Object> options = new HashMap<>();
+        options.put(LineageConfig.ENABLED, true);
+        options.put(LineageConfig.HEARTBEAT_MIN_INTERVAL_MS, heartbeatIntervalMs);
+        doReturn(LineageConfig.resolve(options, Collections.emptyMap(), Collections.emptyMap()))
+                .when(jobMaster)
+                .resolveLineageConfig();
+        doReturn(JobStatus.RUNNING).when(jobMaster).getJobStatus();
+
+        JobConfig jobConfig = new JobConfig();
+        jobConfig.setJobContext(new JobContext().setJobMode(JobMode.STREAMING));
+        JobImmutableInformation information = mock(JobImmutableInformation.class);
+        doReturn(jobConfig).when(information).getJobConfig();
+        doReturn(information).when(jobMaster).getJobImmutableInformation();
+
+        doReturn(new ConcurrentHashMap<Integer, AtomicLong>())
+                .when(jobMaster)
+                .getLineageHeartbeatTimes();
+        doNothing().when(jobMaster).submitLineageEmission(any());
+        return jobMaster;
+    }
+
     @Test
     void shouldRunLineageEmissionsOffTheCallerThreadInSubmissionOrder() throws Exception {
         JobMaster jobMaster = mock(JobMaster.class, CALLS_REAL_METHODS);

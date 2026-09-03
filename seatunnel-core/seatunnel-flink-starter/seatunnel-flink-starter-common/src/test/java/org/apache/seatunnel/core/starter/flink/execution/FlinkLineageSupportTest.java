@@ -146,6 +146,33 @@ class FlinkLineageSupportTest {
         Assertions.assertTrue(hint.contains(hookClass), "must name the class Flink could not load");
     }
 
+    /**
+     * The deployment this hint exists for is a session cluster submitted over REST, where the
+     * JobManager-side failure never crosses the wire as an exception object: the client sees a REST
+     * exception whose message carries the server-side stack trace as text. Matching on the
+     * exception type alone would leave exactly that deployment with the bare submission error.
+     */
+    @Test
+    void explainsAMissingHookRelayedAsTextAcrossTheRestBoundary() {
+        String hookClass = LineageJobStatusHook.class.getName();
+        Exception submissionFailure =
+                new RuntimeException(
+                        "Failed to submit job.",
+                        new IllegalStateException(
+                                "[Internal server error., <Exception on server side:"
+                                        + " org.apache.flink.runtime.rest.handler.RestHandlerException:"
+                                        + " Could not deserialize JobGraph."
+                                        + " Caused by: java.lang.ClassNotFoundException: "
+                                        + hookClass
+                                        + ">]"));
+
+        String hint = FlinkLineageSupport.describeMissingHookClass(submissionFailure);
+
+        Assertions.assertNotNull(hint, "a class-loading failure relayed as text must be explained");
+        Assertions.assertTrue(hint.contains("$FLINK_HOME/lib"), "must say where to install it");
+        Assertions.assertTrue(hint.contains(hookClass), "must name the class Flink could not load");
+    }
+
     @Test
     void leavesUnrelatedSubmissionFailuresUntouched() {
         Assertions.assertNull(
@@ -157,5 +184,13 @@ class FlinkLineageSupportTest {
                 FlinkLineageSupport.describeMissingHookClass(
                         new IllegalStateException("Recovery is suppressed")));
         Assertions.assertNull(FlinkLineageSupport.describeMissingHookClass(null));
+        // Naming the hook class is not enough on its own: only a class-loading failure means the
+        // artifact is missing from the JobManager.
+        Assertions.assertNull(
+                FlinkLineageSupport.describeMissingHookClass(
+                        new IllegalStateException(
+                                "Could not serialize "
+                                        + LineageJobStatusHook.class.getName()
+                                        + ": java.io.NotSerializableException")));
     }
 }

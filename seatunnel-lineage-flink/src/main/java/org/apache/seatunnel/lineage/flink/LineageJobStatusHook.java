@@ -74,6 +74,13 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
     private transient volatile ScheduledFuture<?> heartbeat;
 
     /**
+     * Set by the terminal callback before its event is emitted, so a heartbeat that is scheduled or
+     * already running cannot report RUNNING after it. Transient for the same reason as the
+     * heartbeat: nothing is terminal on the client that serializes this into the JobGraph.
+     */
+    private transient boolean terminal;
+
+    /**
      * @param config lineage configuration with the auth token already removed
      * @param events the start events whose runs this hook closes
      * @param clientReportsCompletion whether the submitting client reports the successful terminal
@@ -170,12 +177,25 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
         }
     }
 
-    /** Stops the heartbeat before the terminal event, so no RUNNING can follow it. */
+    /**
+     * Stops the heartbeat before the terminal event, so no RUNNING can follow it.
+     *
+     * <p>Cancelling is not enough on its own: {@code cancel(false)} does not stop a heartbeat that
+     * is already inside its send, which blocks for as long as the receiver's timeout and retries
+     * allow. Such a RUNNING could reach the receiver after the terminal event and leave the run
+     * marked running forever, which is the failure the heartbeat exists to prevent. Claiming the
+     * emit monitor therefore both publishes the terminal flag, which suppresses any heartbeat that
+     * has not started sending, and waits out one that has. The wait is bounded by the same timeout
+     * as a single terminal send, and only ever happens on a job that is already finishing.
+     */
     private void stopHeartbeat() {
         ScheduledFuture<?> scheduled = heartbeat;
         if (scheduled != null) {
             scheduled.cancel(false);
             heartbeat = null;
+        }
+        synchronized (this) {
+            terminal = true;
         }
     }
 
@@ -198,7 +218,23 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
         private Heartbeats() {}
     }
 
+    /**
+     * Sends one lifecycle event for every run this hook owns.
+     *
+     * <p>Emissions are serialized so that a terminal event never overtakes a heartbeat that is
+     * already being sent, and so that a heartbeat which was waiting for the monitor sees the
+     * terminal flag and sends nothing. See {@link #stopHeartbeat()}.
+     */
     private void emit(LineageEventType eventType, String flinkJobId) {
+        synchronized (this) {
+            if (eventType == LineageEventType.RUNNING && terminal) {
+                return;
+            }
+            send(eventType, flinkJobId);
+        }
+    }
+
+    private void send(LineageEventType eventType, String flinkJobId) {
         try {
             LineageConfig runtimeConfig =
                     config.withAuthToken(

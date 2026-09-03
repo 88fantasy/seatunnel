@@ -19,6 +19,7 @@ package org.apache.seatunnel.engine.server.master;
 
 import org.apache.seatunnel.api.common.metrics.JobMetrics;
 import org.apache.seatunnel.api.common.metrics.Measurement;
+import org.apache.seatunnel.api.common.metrics.MetricNames;
 import org.apache.seatunnel.api.sink.multitablesink.MultiTableSink;
 import org.apache.seatunnel.api.table.catalog.TablePath;
 import org.apache.seatunnel.common.constants.JobMode;
@@ -100,13 +101,20 @@ public final class ZetaLineageReporter {
      * metrics issues an RPC to every worker, and sending performs an HTTP request. Doing either on
      * the coordinator thread lets an unreachable lineage receiver stall checkpointing.
      *
+     * <p>A non-positive interval disables the heartbeat, which is what the option means on Flink
+     * too. Without this the comparison below would read every completed checkpoint as overdue and
+     * report on each one, so the value that turns heartbeats off on one engine would produce the
+     * heaviest possible reporting on the other.
+     *
      * @param jobMaster job master that owns the pipeline
      * @param pipelineId completed checkpoint pipeline identifier
      */
     public static void reportHeartbeat(JobMaster jobMaster, int pipelineId) {
         try {
             LineageConfig config = jobMaster.resolveLineageConfig();
-            if (!config.enabled() || jobMaster.getJobStatus().isEndState()) {
+            if (!config.enabled()
+                    || config.heartbeatMinIntervalMs() <= 0
+                    || jobMaster.getJobStatus().isEndState()) {
                 return;
             }
             if (jobMaster.getJobImmutableInformation().getJobConfig().getJobContext().getJobMode()
@@ -346,13 +354,17 @@ public final class ZetaLineageReporter {
     private static LineageOutputStatistics outputStatistics(
             JobMetrics metrics, SinkAction<?, ?, ?, ?> sinkAction, int outputCount) {
         List<TablePath> tablePaths = metricTablePaths(sinkAction);
-        Long committedCount = metricValue(metrics, "SinkCommittedCount", outputCount, tablePaths);
-        Long committedBytes = metricValue(metrics, "SinkCommittedBytes", outputCount, tablePaths);
+        Long committedCount =
+                metricValue(metrics, MetricNames.SINK_COMMITTED_COUNT, outputCount, tablePaths);
+        Long committedBytes =
+                metricValue(metrics, MetricNames.SINK_COMMITTED_BYTES, outputCount, tablePaths);
         if (committedCount != null && committedCount > 0) {
             return new LineageOutputStatistics(committedCount, committedBytes, "committed");
         }
-        Long writeCount = metricValue(metrics, "SinkWriteCount", outputCount, tablePaths);
-        Long writeBytes = metricValue(metrics, "SinkWriteBytes", outputCount, tablePaths);
+        Long writeCount =
+                metricValue(metrics, MetricNames.SINK_WRITE_COUNT, outputCount, tablePaths);
+        Long writeBytes =
+                metricValue(metrics, MetricNames.SINK_WRITE_BYTES, outputCount, tablePaths);
         if (writeCount != null && writeCount > 0) {
             return new LineageOutputStatistics(writeCount, writeBytes, "attempted");
         }

@@ -20,9 +20,11 @@ package org.apache.seatunnel.lineage.flink;
 import org.apache.seatunnel.lineage.LineageBackend;
 import org.apache.seatunnel.lineage.LineageConfig;
 import org.apache.seatunnel.lineage.LineageEvent;
+import org.apache.seatunnel.lineage.LineageEventType;
 
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 
 /**
  * Captures the events a hook emits, so a test can assert on them without a receiver.
@@ -36,9 +38,20 @@ public final class RecordingLineageBackend implements LineageBackend {
     static final List<LineageEvent> EVENTS = new CopyOnWriteArrayList<>();
     static final List<LineageConfig> CONFIGS = new CopyOnWriteArrayList<>();
 
+    /**
+     * Holds a heartbeat inside its send, the way an unreachable receiver does, so a test can assert
+     * on what happens when a terminal event arrives while a RUNNING is still in flight. Counted
+     * down when the send is entered; the send then waits for {@link #HEARTBEAT_RELEASE}.
+     */
+    static volatile CountDownLatch HEARTBEAT_ENTERED;
+
+    static volatile CountDownLatch HEARTBEAT_RELEASE;
+
     static void reset() {
         EVENTS.clear();
         CONFIGS.clear();
+        HEARTBEAT_ENTERED = null;
+        HEARTBEAT_RELEASE = null;
     }
 
     @Override
@@ -48,6 +61,16 @@ public final class RecordingLineageBackend implements LineageBackend {
 
     @Override
     public void emit(LineageConfig config, LineageEvent event) {
+        CountDownLatch release = HEARTBEAT_RELEASE;
+        if (release != null && event.eventType() == LineageEventType.RUNNING) {
+            HEARTBEAT_ENTERED.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
         CONFIGS.add(config);
         EVENTS.add(event);
     }

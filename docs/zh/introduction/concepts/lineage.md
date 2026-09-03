@@ -39,7 +39,7 @@ SeaTunnel 可以从 Zeta 和 Flink 执行引擎发射表级 OpenLineage `RunEven
 | `openlineage_retry_times` | Int | `3` | 发送失败后的重试次数。 |
 | `openlineage_run_facet` | String | `seatunnel_properties` | 自定义 run facet 的名称。 |
 | `openlineage_run_properties` | Map | 无 | 写入 run facet 的自定义属性。 |
-| `openlineage_heartbeat_min_interval_ms` | Long | `3600000` | 流作业心跳的最小间隔，单位为毫秒。 |
+| `openlineage_heartbeat_min_interval_ms` | Long | `3600000` | 流作业心跳的最小间隔，单位为毫秒。设置为 `0` 表示关闭心跳上报。 |
 | `openlineage_producer` | String | `https://seatunnel.apache.org/<version>` | OpenLineage producer 标识。默认值在运行时根据当前 SeaTunnel 版本生成。 |
 
 每个配置项独立按照以下优先级解析：
@@ -180,7 +180,8 @@ Paimon 数据集。Doris 的 `fenodes` 通常是 HTTP Stream Load
 4. 未结束的作业会周期性发送心跳事件，使接收端不会把仍在运行的作业误判为 producer 已死。
    两个引擎的来源不同：Zeta 搭在 checkpoint 完成回调上，因此关闭 checkpoint 的 Zeta 作业没有心跳；
    Flink 则由 JobManager 上的定时任务发送，不依赖 checkpoint。两者都受
-   `openlineage_heartbeat_min_interval_ms` 节流。确实停止上报的 run 受接收端 abandoned-run
+   `openlineage_heartbeat_min_interval_ms` 节流，该项设置为 `0` 时两者都不再发送心跳。
+   确实停止上报的 run 受接收端 abandoned-run
    超时约束，该推断状态会被之后到达的终态事件覆盖。
 5. `seatunnel-lineage-flink-<version>-shaded.jar` 必须安装到 JobManager 的 `lib/` 目录，
    **未安装时开启血缘的作业会提交失败**。
