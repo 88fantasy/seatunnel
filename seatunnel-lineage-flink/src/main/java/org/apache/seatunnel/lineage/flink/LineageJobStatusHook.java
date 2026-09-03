@@ -30,6 +30,10 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Emits the terminal lineage event for a Flink job from the JobManager.
@@ -62,6 +66,14 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
     private final boolean clientReportsCompletion;
 
     /**
+     * Cancelled by whichever terminal callback fires. Transient because the hook is serialized into
+     * the JobGraph on the client, where no heartbeat is running; the JobManager starts its own on
+     * {@code onCreated}. Volatile because the callbacks that start and stop it are not guaranteed
+     * to run on one thread.
+     */
+    private transient volatile ScheduledFuture<?> heartbeat;
+
+    /**
      * @param config lineage configuration with the auth token already removed
      * @param events the start events whose runs this hook closes
      * @param clientReportsCompletion whether the submitting client reports the successful terminal
@@ -87,7 +99,10 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
             if ("equals".equals(methodName)) {
                 return args != null && args.length == 1 && proxy == args[0];
             }
-            if ("onFinished".equals(methodName)) {
+            if ("onCreated".equals(methodName)) {
+                startHeartbeat(jobId(args));
+            } else if ("onFinished".equals(methodName)) {
+                stopHeartbeat();
                 // An attached client emits the successful terminal event with the output
                 // statistics read from the job accumulators, which are not reachable from here.
                 // Both events describe the same run, and the later arrival wins on the receiver,
@@ -96,8 +111,10 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
                     emit(LineageEventType.COMPLETE, jobId(args));
                 }
             } else if ("onFailed".equals(methodName)) {
+                stopHeartbeat();
                 emit(LineageEventType.FAIL, jobId(args));
             } else if ("onCanceled".equals(methodName)) {
+                stopHeartbeat();
                 emit(LineageEventType.ABORT, jobId(args));
             }
         } catch (Throwable error) {
@@ -114,6 +131,71 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
      */
     private static String jobId(Object[] args) {
         return args != null && args.length > 0 && args[0] != null ? String.valueOf(args[0]) : null;
+    }
+
+    /**
+     * Starts the periodic RUNNING event that keeps the receiver from treating a still-running job
+     * as abandoned.
+     *
+     * <p>A receiver decides a run was abandoned from how long it has been silent, so a job that
+     * outlives that window without reporting has its lineage dropped from the current graph even
+     * though it is healthy. Zeta reports from its checkpoint completion callback, but Flink offers
+     * the JobManager no periodic callback to hang this on: {@code JobStatusHook} is purely
+     * transitional, and the client's {@code JobListener} is gone once a detached submission
+     * returns. A scheduled task is therefore the only place this can live for a detached job, which
+     * is how streaming jobs are normally submitted.
+     *
+     * <p>Batch jobs are not excluded. The interval is coarse enough that a batch job finishes long
+     * before the first heartbeat, and one that does run for hours needs the heartbeat for the same
+     * reason a streaming job does.
+     *
+     * <p>The first heartbeat is one full interval away because the start event has just refreshed
+     * the run.
+     */
+    private void startHeartbeat(String flinkJobId) {
+        long intervalMs = config.heartbeatMinIntervalMs();
+        if (intervalMs <= 0) {
+            return;
+        }
+        try {
+            heartbeat =
+                    Heartbeats.SCHEDULER.scheduleWithFixedDelay(
+                            () -> emit(LineageEventType.RUNNING, flinkJobId),
+                            intervalMs,
+                            intervalMs,
+                            TimeUnit.MILLISECONDS);
+        } catch (Throwable error) {
+            // A job must not fail because its lineage heartbeat could not be scheduled.
+            LOGGER.warn("Failed to schedule Flink lineage heartbeat", error);
+        }
+    }
+
+    /** Stops the heartbeat before the terminal event, so no RUNNING can follow it. */
+    private void stopHeartbeat() {
+        ScheduledFuture<?> scheduled = heartbeat;
+        if (scheduled != null) {
+            scheduled.cancel(false);
+            heartbeat = null;
+        }
+    }
+
+    /**
+     * Holds the one scheduler shared by every job on this JobManager.
+     *
+     * <p>A single daemon thread rather than one per job: heartbeats are hours apart, and {@code
+     * scheduleWithFixedDelay} lets a slow send push its own next run back instead of piling up.
+     * Daemon so a JobManager shutdown is never held open by it.
+     */
+    private static final class Heartbeats {
+        static final ScheduledExecutorService SCHEDULER =
+                Executors.newSingleThreadScheduledExecutor(
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "seatunnel-lineage-heartbeat");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
+
+        private Heartbeats() {}
     }
 
     private void emit(LineageEventType eventType, String flinkJobId) {

@@ -21,15 +21,20 @@ import org.apache.seatunnel.lineage.LineageBackend;
 import org.apache.seatunnel.lineage.LineageConfig;
 import org.apache.seatunnel.lineage.LineageEvent;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
-/** Captures the events a hook emits, so a test can assert on them without a receiver. */
+/**
+ * Captures the events a hook emits, so a test can assert on them without a receiver.
+ *
+ * <p>The lists are concurrent because the heartbeat writes from the scheduler thread while the test
+ * asserts from its own.
+ */
 public final class RecordingLineageBackend implements LineageBackend {
     static final String NAME = "recording";
 
-    static final List<LineageEvent> EVENTS = new ArrayList<>();
-    static final List<LineageConfig> CONFIGS = new ArrayList<>();
+    static final List<LineageEvent> EVENTS = new CopyOnWriteArrayList<>();
+    static final List<LineageConfig> CONFIGS = new CopyOnWriteArrayList<>();
 
     static void reset() {
         EVENTS.clear();

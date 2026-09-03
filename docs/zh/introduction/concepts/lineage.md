@@ -177,10 +177,11 @@ Paimon 数据集。Doris 的 `fenodes` 通常是 HTTP Stream Load
    `flink-20-starter`；Flink 1.13 和 1.15 starter 不提供该能力。
 3. Flink detached 作业没有 `outputStatistics`，因为 detached 结果不暴露 accumulators。Attached
    执行可以发射可获得的 `SinkWriteCount` 和 `SinkWriteBytes`，其口径为 `attempted`。
-4. 流作业只有在开启 checkpoint 时才有心跳。关闭 checkpoint 后，血缘边受接收端第一层 24 小时
-   abandoned-run 超时约束。即使开启 checkpoint 心跳，也不能延长接收端对未完成 run 的第二层
-   7 天绝对寿命上限；持续上报但永不终止的 run 仍可能在 7 天后被标记为 `ABANDONED`，之后
-   到达的终态事件可以覆盖这一推断状态。
+4. 未结束的作业会周期性发送心跳事件，使接收端不会把仍在运行的作业误判为 producer 已死。
+   两个引擎的来源不同：Zeta 搭在 checkpoint 完成回调上，因此关闭 checkpoint 的 Zeta 作业没有心跳；
+   Flink 则由 JobManager 上的定时任务发送，不依赖 checkpoint。两者都受
+   `openlineage_heartbeat_min_interval_ms` 节流。确实停止上报的 run 受接收端 abandoned-run
+   超时约束，该推断状态会被之后到达的终态事件覆盖。
 5. `seatunnel-lineage-flink-<version>-shaded.jar` 必须安装到 JobManager 的 `lib/` 目录，
    **未安装时开启血缘的作业会提交失败**。
    状态 hook 是 JobGraph 的结构性字段，JobManager 在建立 user class loader 之前就用 system

@@ -195,11 +195,13 @@ still emitted.
 3. A detached Flink job has no `outputStatistics`, because its client result does not expose
    accumulators. Attached execution can emit the available `SinkWriteCount` and `SinkWriteBytes`
    values, with `attempted` semantics.
-4. Streaming jobs receive heartbeat events only when checkpointing is enabled. With checkpointing
-   disabled, the lineage edge is subject to the receiver's first 24-hour abandoned-run timeout.
-   Checkpoint heartbeats do not extend the receiver's second, seven-day absolute lifetime limit for
-   an uncompleted run. A continuously running run can still be marked `ABANDONED` after seven days;
-   a later terminal event can replace that inferred state.
+4. A job that has not finished reports periodic heartbeat events, so a receiver does not mistake a
+   still-running job for one whose producer died. The two engines source them differently: Zeta
+   emits from its checkpoint completion callback, so a Zeta job with checkpointing disabled has no
+   heartbeat, while Flink emits from a scheduled task on the JobManager and therefore does not
+   depend on checkpointing. Both are throttled by `openlineage_heartbeat_min_interval_ms`. A run
+   that does stop reporting is subject to the receiver's abandoned-run timeout, and the state
+   inferred that way is replaced by a terminal event arriving later.
 5. `seatunnel-lineage-flink-<version>-shaded.jar` must be installed in the JobManager's `lib/`
    directory, and **a job with lineage enabled fails to submit if it is not**. The status hook is a structural field of the
    JobGraph, so the JobManager deserializes it with the system class loader before any user class

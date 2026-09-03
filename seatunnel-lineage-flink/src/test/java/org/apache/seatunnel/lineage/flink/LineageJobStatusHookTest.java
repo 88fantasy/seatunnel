@@ -47,10 +47,17 @@ class LineageJobStatusHookTest {
     }
 
     private static LineageConfig config(String token) {
+        return config(token, null);
+    }
+
+    private static LineageConfig config(String token, Long heartbeatMs) {
         Map<String, Object> options = new LinkedHashMap<>();
         options.put(LineageConfig.ENABLED, true);
         options.put(LineageConfig.TRANSPORT, RecordingLineageBackend.NAME);
         options.put(LineageConfig.URL, "http://127.0.0.1:1");
+        if (heartbeatMs != null) {
+            options.put(LineageConfig.HEARTBEAT_MIN_INTERVAL_MS, heartbeatMs);
+        }
         LineageConfig resolved =
                 LineageConfig.resolve(
                         options,
@@ -208,6 +215,64 @@ class LineageJobStatusHookTest {
                         Object.class.getMethod("equals", Object.class),
                         new Object[] {new Object()}));
         Assertions.assertTrue(RecordingLineageBackend.EVENTS.isEmpty());
+    }
+
+    /**
+     * A streaming job never reaches a terminal callback while it is healthy, so without this the
+     * receiver would see nothing after the start event and eventually treat the run as abandoned.
+     */
+    @Test
+    void emitsHeartbeatsWhileTheJobRunsAndStopsAtTheTerminalEvent() throws Throwable {
+        InvocationHandler hook =
+                new LineageJobStatusHook(
+                        config(null, 30L), Collections.singletonList(event()), false);
+
+        invoke(hook, "onCreated", "job-1");
+
+        long deadlineMs = System.currentTimeMillis() + 5000;
+        while (RecordingLineageBackend.EVENTS.size() < 2
+                && System.currentTimeMillis() < deadlineMs) {
+            Thread.sleep(10);
+        }
+        Assertions.assertTrue(
+                RecordingLineageBackend.EVENTS.size() >= 2,
+                "onCreated must start a repeating heartbeat, saw "
+                        + RecordingLineageBackend.EVENTS.size());
+        for (LineageEvent emitted : RecordingLineageBackend.EVENTS) {
+            Assertions.assertEquals(LineageEventType.RUNNING, emitted.eventType());
+            Assertions.assertEquals(
+                    "job-1",
+                    emitted.runProperties().get(LineageJobStatusHook.FLINK_JOB_ID_PROPERTY));
+        }
+
+        invoke(hook, "onCanceled", "job-1");
+        int afterTerminal = RecordingLineageBackend.EVENTS.size();
+        Assertions.assertEquals(
+                LineageEventType.ABORT,
+                RecordingLineageBackend.EVENTS.get(afterTerminal - 1).eventType());
+
+        // Several heartbeat intervals: a RUNNING arriving after the terminal event would reopen a
+        // run the receiver has already closed.
+        Thread.sleep(300);
+        Assertions.assertEquals(
+                afterTerminal,
+                RecordingLineageBackend.EVENTS.size(),
+                "no heartbeat may follow the terminal event");
+    }
+
+    /** A heartbeat interval of zero disables the heartbeat rather than scheduling a busy loop. */
+    @Test
+    void doesNotScheduleAHeartbeatWhenTheIntervalIsZero() throws Throwable {
+        InvocationHandler hook =
+                new LineageJobStatusHook(
+                        config(null, 0L), Collections.singletonList(event()), false);
+
+        invoke(hook, "onCreated", "job-1");
+        Thread.sleep(150);
+
+        Assertions.assertTrue(
+                RecordingLineageBackend.EVENTS.isEmpty(),
+                "a zero interval must not emit heartbeats");
     }
 
     /** Calls a JobStatusHook callback the way the proxy does, by name. */
