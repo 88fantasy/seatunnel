@@ -110,3 +110,74 @@ Besides the properties configured through `openlineage_run_properties`, the run 
 `engine` property naming the execution engine that reported the run. Each engine adds the
 identifiers that make its run findable in that engine's own UI; those are described in the engine
 sections below.
+## Flink
+
+### Flink cluster configuration
+
+Flink reads cluster-level values with the `openlineage.` prefix. For Flink 1.20 and later, use
+`config.yaml`; the legacy `flink-conf.yaml` name is also supported:
+
+```yaml
+openlineage.enabled: true
+openlineage.transport: http
+openlineage.url: http://lineage.example/api/lineage
+openlineage.namespace: seatunnel
+openlineage.timeout_ms: 10000
+openlineage.retry_times: 3
+openlineage.run_facet: seatunnel_properties
+openlineage.heartbeat_min_interval_ms: 3600000
+openlineage.producer: https://seatunnel.apache.org/<version>
+```
+
+### Installing the lineage artifact on the cluster
+
+The Flink integration ships one deployable artifact, built by the `seatunnel-lineage-flink` module:
+
+```text
+seatunnel-lineage-flink-<version>-shaded.jar
+```
+
+Install it in the JobManager's `$FLINK_HOME/lib` directory and restart the JobManager, because a
+Flink class path is fixed at startup. Deploy exactly one copy, and remove the previous version when
+upgrading: two versions in `lib/` leave the effective class path order undefined.
+
+The artifact relocates Jackson, the OpenLineage model, Apache HttpClient, and the commons-logging
+bridge under `org.apache.seatunnel.lineage.shaded`. That matters because `lib/` is on the parent
+class loader, so anything placed there is visible to every job running on that cluster; relocation
+keeps this artifact from changing which Jackson those jobs see. Do not substitute the SeaTunnel
+starter jar, which carries the same libraries unrelocated.
+
+Keep the same cluster configuration in both configuration-file layouts when an installation supports
+both Flink 1.20+ and legacy deployments.
+
+**A job with lineage enabled fails to submit when the artifact is not installed.** This is
+deliberate — a job that silently loses its lineage is worse than one that refuses to start — and
+the submission error names the missing class and how to resolve it. To submit without installing
+it, set `openlineage_enabled=false`.
+
+### Events reported by Flink
+
+Flink registers the status hook only when the runtime exposes the required API. Flink lineage
+support requires Flink 1.16 or later, which in the SeaTunnel starters means the Flink 1.20 path;
+the Flink 1.13 and 1.15 starters do not register this hook and run the job unchanged.
+
+Exactly one side reports a successful Flink job, so a run never receives two `COMPLETE` events. An
+attached submission reports it from the client, which is the only place the output statistics are
+readable; a detached submission reports it from the JobManager status hook, without statistics.
+`FAIL` and `ABORT` come from the status hook, except for a job that never started: a submission
+that fails — no available slots, a rejected credential, or a JobManager that cannot load the status
+hook — is reported as `FAIL` by the client, because no hook runs for a job the cluster never
+created.
+
+A detached Flink job therefore has no `outputStatistics`, because its client result does not expose
+accumulators. Attached execution emits the available `SinkWriteCount` and `SinkWriteBytes` values,
+with `attempted` semantics.
+
+The run facet carries a `flink_job_id` property in addition to `engine`. The run ID is derived
+before submission, when no Flink job ID exists yet, so `flink_job_id` is what ties a lineage run
+back to the job shown in the Flink UI and REST API.
+
+A job that has not finished reports periodic heartbeat events, so a receiver does not mistake a
+still-running job for one whose producer died. Flink emits them from a scheduled task on the
+JobManager and therefore does not depend on checkpointing. They are throttled by
+`openlineage_heartbeat_min_interval_ms`, and setting it to `0` stops them.

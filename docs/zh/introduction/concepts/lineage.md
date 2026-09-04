@@ -101,3 +101,67 @@ Paimon 数据集。Doris 的 `fenodes` 通常是 HTTP Stream Load
 
 除 `openlineage_run_properties` 配置的属性外，run facet 还会携带 `engine` 属性，标明上报该 run
 的执行引擎。各引擎还会补充能在自己 UI 中定位该 run 的标识，见下面各引擎章节。
+
+## Flink
+
+### Flink 集群配置
+
+Flink 使用 `openlineage.` 前缀读取集群级配置。Flink 1.20 及之后版本使用 `config.yaml`；旧版
+`flink-conf.yaml` 文件名也支持：
+
+```yaml
+openlineage.enabled: true
+openlineage.transport: http
+openlineage.url: http://lineage.example/api/lineage
+openlineage.namespace: seatunnel
+openlineage.timeout_ms: 10000
+openlineage.retry_times: 3
+openlineage.run_facet: seatunnel_properties
+openlineage.heartbeat_min_interval_ms: 3600000
+openlineage.producer: https://seatunnel.apache.org/<version>
+```
+
+### 在集群上安装血缘产物
+
+Flink 侧只有一个可部署产物，由 `seatunnel-lineage-flink` 模块构建：
+
+```text
+seatunnel-lineage-flink-<version>-shaded.jar
+```
+
+把它放进 JobManager 的 `$FLINK_HOME/lib` 目录并重启 JobManager —— Flink 的 classpath 在启动时固定。
+只放一份，升级时先删掉旧版本：`lib/` 里同时存在两个版本会让实际的 classpath 顺序变得不确定。
+
+该产物把 Jackson、OpenLineage 模型、Apache HttpClient 以及 commons-logging 桥接一并 relocate 到
+`org.apache.seatunnel.lineage.shaded` 之下。这一点很关键：`lib/` 位于父 classloader，放进去的类对该
+集群上的**所有**作业可见，relocate 才能保证本产物不会改变那些作业看到的 Jackson 版本。不要用
+SeaTunnel starter jar 代替它 —— 后者携带的是未 relocate 的同名依赖。
+
+如果安装环境同时支持 Flink 1.20+ 和 legacy 部署，应在实际使用的两种配置文件布局中保持相同配置。
+
+**未安装该产物时，开启血缘的作业会提交失败。** 这是刻意的设计——静默丢失血缘比拒绝启动更糟——
+提交错误会指出缺失的类以及解决办法。若要在未安装的情况下提交作业，请设置
+`openlineage_enabled=false`。
+
+### Flink 上报的事件
+
+只有运行时提供所需 API 时，Flink 才会注册状态 hook。Flink 侧血缘需要 Flink 1.16 或更高版本；在
+SeaTunnel starter 中对应 Flink 1.20 路径，Flink 1.13 和 1.15 starter 不注册该 hook，作业行为
+保持不变。
+
+Flink 作业成功结束时只有一侧上报终态事件，因此同一个 run 不会收到两次 `COMPLETE`。attached
+提交由客户端上报，因为只有客户端能读到输出统计；detached 提交由 JobManager 的 status hook
+上报，不带统计信息。`FAIL` 和 `ABORT` 由 status hook 上报，作业根本没有启动的情况除外：提交
+失败时——没有可用 slot、凭据被拒绝，或者 JobManager 无法加载 status hook——由客户端上报
+`FAIL`，因为集群从未创建过这个作业，也就不会有 hook 运行。
+
+因此 Flink detached 作业没有 `outputStatistics`，因为 detached 结果不暴露 accumulators。
+Attached 执行会发射可获得的 `SinkWriteCount` 和 `SinkWriteBytes`，其口径为 `attempted`。
+
+run facet 除 `engine` 外还携带 `flink_job_id` 属性。runId 在作业提交前就已生成，那时还没有
+Flink job ID，因此 `flink_job_id` 是把血缘 run 关联回 Flink UI 与 REST API 中那个作业的唯一
+途径。
+
+未结束的作业会周期性发送心跳事件，使接收端不会把仍在运行的作业误判为 producer 已死。Flink 由
+JobManager 上的定时任务发送，不依赖 checkpoint。心跳受 `openlineage_heartbeat_min_interval_ms`
+节流，设置为 `0` 时不再发送。
