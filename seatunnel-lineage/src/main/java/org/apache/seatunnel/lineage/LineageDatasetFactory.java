@@ -22,6 +22,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
 
 /** Builds canonical datasets from connector option maps without depending on connector classes. */
 public final class LineageDatasetFactory {
@@ -81,16 +83,10 @@ public final class LineageDatasetFactory {
         if (catalog == null || catalog.trim().isEmpty()) {
             return Collections.emptyList();
         }
-        List<LineageDataset> result = new ArrayList<>();
-        for (Map<String, ?> table : tables(options)) {
-            TableReference reference = tableReference(table);
-            if (reference == null) {
-                continue;
-            }
-            LineageDatasetNaming.paimon(catalog, reference.database, reference.table)
-                    .ifPresent(result::add);
-        }
-        return result;
+        return datasets(
+                options,
+                reference ->
+                        LineageDatasetNaming.paimon(catalog, reference.database, reference.table));
     }
 
     private static List<LineageDataset> doris(Map<String, ?> options) {
@@ -99,16 +95,11 @@ public final class LineageDatasetFactory {
         if (queryPort == null) {
             return Collections.emptyList();
         }
-        List<LineageDataset> result = new ArrayList<>();
-        for (Map<String, ?> table : tables(options)) {
-            TableReference reference = tableReference(table);
-            if (reference == null) {
-                continue;
-            }
-            LineageDatasetNaming.doris(host, queryPort, reference.database, reference.table)
-                    .ifPresent(result::add);
-        }
-        return result;
+        return datasets(
+                options,
+                reference ->
+                        LineageDatasetNaming.doris(
+                                host, queryPort, reference.database, reference.table));
     }
 
     private static List<LineageDataset> jdbc(Map<String, ?> options) {
@@ -125,20 +116,32 @@ public final class LineageDatasetFactory {
             if (scheme == null || host == null || port <= 0) {
                 return Collections.emptyList();
             }
-            List<LineageDataset> result = new ArrayList<>();
-            for (Map<String, ?> table : tables(options)) {
-                TableReference reference = tableReference(table);
-                if (reference == null) {
-                    continue;
-                }
-                String database = reference.database == null ? urlDatabase : reference.database;
-                LineageDatasetNaming.jdbc(scheme, host, port, database, reference.table)
-                        .ifPresent(result::add);
-            }
-            return result;
+            return datasets(
+                    options,
+                    reference ->
+                            LineageDatasetNaming.jdbc(
+                                    scheme,
+                                    host,
+                                    port,
+                                    reference.database == null ? urlDatabase : reference.database,
+                                    reference.table));
         } catch (IllegalArgumentException e) {
             return Collections.emptyList();
         }
+    }
+
+    /** Maps every resolvable table entry of a connector block through one naming rule. */
+    private static List<LineageDataset> datasets(
+            Map<String, ?> options, Function<TableReference, Optional<LineageDataset>> naming) {
+        List<LineageDataset> result = new ArrayList<>();
+        for (Map<String, ?> table : tables(options)) {
+            TableReference reference = tableReference(table);
+            if (reference == null) {
+                continue;
+            }
+            naming.apply(reference).ifPresent(result::add);
+        }
+        return result;
     }
 
     private static boolean isJdbc(String pluginName, Map<String, ?> options) {

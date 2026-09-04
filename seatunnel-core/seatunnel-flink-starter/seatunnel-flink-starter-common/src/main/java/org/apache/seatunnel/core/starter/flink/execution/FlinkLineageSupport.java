@@ -18,70 +18,67 @@
 package org.apache.seatunnel.core.starter.flink.execution;
 
 import org.apache.seatunnel.api.common.JobContext;
-import org.apache.seatunnel.api.common.metrics.MetricNames;
 import org.apache.seatunnel.lineage.LineageConfig;
 import org.apache.seatunnel.lineage.LineageDataset;
 import org.apache.seatunnel.lineage.LineageEvent;
 import org.apache.seatunnel.lineage.LineageEventType;
-import org.apache.seatunnel.lineage.LineageOutputStatistics;
-import org.apache.seatunnel.lineage.LineageReporter;
-import org.apache.seatunnel.lineage.LineageReporterFactory;
 import org.apache.seatunnel.lineage.LineageRunIds;
 import org.apache.seatunnel.lineage.LineageRuntime;
 import org.apache.seatunnel.lineage.flink.FlinkClusterOptions;
-import org.apache.seatunnel.lineage.flink.LineageJobStatusHook;
-import org.apache.seatunnel.lineage.flink.ProxyReturnValues;
 
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.configuration.DeploymentOptions;
-import org.apache.flink.core.execution.JobListener;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.graph.StreamGraph;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
-/** Flink 1.20 lineage integration kept binary-compatible with the 1.15 common starter. */
+/**
+ * The version-agnostic half of the Flink lineage integration.
+ *
+ * <p>Everything here compiles against Flink 1.15. The one step that cannot — building and
+ * registering a {@code JobStatusHook}, which is a 1.16+ API — lives behind {@link
+ * FlinkLineageHooks}, whose per-version copy decides whether lineage is available at all.
+ */
 public final class FlinkLineageSupport {
     private static final Logger LOGGER = LoggerFactory.getLogger(FlinkLineageSupport.class);
-    private static final String JOB_STATUS_HOOK = "org.apache.flink.core.execution.JobStatusHook";
 
-    /** The hook implementation the JobManager must be able to load; see {@link #register}. */
-    private static final String HOOK_HANDLER_CLASS = LineageJobStatusHook.class.getName();
+    /**
+     * Binary name of the hook implementation the JobManager must be able to load.
+     *
+     * <p>A literal rather than {@code LineageJobStatusHook.class.getName()}: that class implements
+     * a Flink 1.16+ interface, so this module cannot resolve it. {@code FlinkLineageHookNamingTest}
+     * in the 1.20 starter asserts the two still agree.
+     */
+    static final String HOOK_HANDLER_CLASS =
+            "org.apache.seatunnel.lineage.flink.LineageJobStatusHook";
 
-    /** The artifact that carries {@link LineageJobStatusHook} into a Flink cluster's lib/. */
+    /** The artifact that carries the hook class into a Flink cluster's lib/ directory. */
     private static final String HOOK_ARTIFACT = "seatunnel-lineage-flink-<version>-shaded.jar";
 
     private FlinkLineageSupport() {}
 
     /**
-     * Returns whether the running Flink version exposes the status-hook API used by lineage.
+     * Returns whether this starter exposes the status-hook API used by lineage.
      *
      * <p>The capability check keeps the common starter compatible with Flink 1.13 and 1.15, where
      * the lineage integration must remain inactive.
      */
     public static boolean isSupported() {
-        return findJobStatusHookMethod() != null;
+        return FlinkLineageHooks.isSupported();
     }
 
     /** Resolves lineage configuration using the Flink cluster configuration and process env. */
     public static LineageConfig resolveConfig(Map<String, ?> jobOptions) {
-        LineageConfig.rejectJobAuthToken(jobOptions);
-        if (Boolean.FALSE.equals(enabledValue(jobOptions))) {
-            return LineageConfig.defaults();
-        }
         return resolveConfig(jobOptions, FlinkClusterOptions.load(), System.getenv());
     }
 
@@ -107,23 +104,16 @@ public final class FlinkLineageSupport {
      */
     public static boolean isLineageEnabled(
             Map<String, ?> jobOptions, Map<String, ?> clusterOptions, Map<String, ?> environment) {
-        Boolean value = enabledValue(jobOptions);
-        if (value != null) {
-            return value;
-        }
-        value = enabledEnvironmentValue(environment);
-        if (value != null) {
-            return value;
-        }
-        value = enabledValue(clusterOptions);
-        return value != null && value;
+        return LineageConfig.isEnabled(jobOptions, clusterOptions, environment);
     }
 
     /**
-     * Registers the 1.20-only status hook and the attached-mode statistics listener. A null result
-     * means that the running Flink version does not expose the hook API.
+     * Registers the 1.20-only status hook and the attached-mode statistics listener.
+     *
+     * @return the stream graph the caller must submit, or null when lineage was not registered and
+     *     the caller must fall back to its own submission path
      */
-    public static Registration register(
+    public static StreamGraph register(
             StreamExecutionEnvironment environment,
             LineageConfig config,
             JobContext jobContext,
@@ -144,8 +134,7 @@ public final class FlinkLineageSupport {
                         jobName);
                 return null;
             }
-            Method registerHook = findJobStatusHookMethod();
-            if (registerHook == null) {
+            if (!FlinkLineageHooks.isSupported()) {
                 LOGGER.warn(
                         "Lineage reporting is enabled but the running Flink version does not"
                                 + " expose the job status hook API, which requires Flink 1.16 or"
@@ -155,9 +144,8 @@ public final class FlinkLineageSupport {
             }
             List<LineageEvent> events = createEvents(config, jobContext, inputs, outputs, jobName);
             try {
-                LineageReporter reporter = LineageReporterFactory.create(config);
                 for (LineageEvent event : events) {
-                    reporter.start(event);
+                    LineageRuntime.emit(config, event);
                 }
             } catch (Throwable error) {
                 LOGGER.warn("Failed to emit Flink lineage start event", error);
@@ -169,16 +157,14 @@ public final class FlinkLineageSupport {
             StreamGraph streamGraph = environment.getStreamGraph(false);
             streamGraph.setJobName(jobName);
             boolean clientReportsTerminalEvent = isAttachedSubmission(environment);
-            Class<?> hookType = registerHook.getParameterTypes()[0];
-            Object hook =
-                    Proxy.newProxyInstance(
-                            hookType.getClassLoader(),
-                            new Class<?>[] {hookType},
-                            new LineageJobStatusHook(
-                                    config.withAuthToken(null),
-                                    events,
-                                    clientReportsTerminalEvent));
-            registerHook.invoke(streamGraph, hook);
+            if (!FlinkLineageHooks.register(
+                    streamGraph,
+                    environment,
+                    config.withAuthToken(null),
+                    events,
+                    clientReportsTerminalEvent)) {
+                return null;
+            }
             // Stated before submission because the JobManager-side failure that follows a missing
             // deployment is a bare ClassNotFoundException that never mentions lineage.
             LOGGER.info(
@@ -186,18 +172,7 @@ public final class FlinkLineageSupport {
                             + " from {} in $FLINK_HOME/lib, otherwise job submission fails",
                     HOOK_HANDLER_CLASS,
                     HOOK_ARTIFACT);
-            try {
-                environment.registerJobListener(
-                        (JobListener)
-                                Proxy.newProxyInstance(
-                                        JobListener.class.getClassLoader(),
-                                        new Class<?>[] {JobListener.class},
-                                        new JobListenerInvocationHandler(
-                                                config.withAuthToken(null), events)));
-            } catch (Throwable error) {
-                LOGGER.warn("Failed to register Flink lineage result listener", error);
-            }
-            return new Registration(streamGraph);
+            return streamGraph;
         } catch (Throwable error) {
             LOGGER.warn("Failed to register Flink lineage support: {}", error.toString(), error);
             return null;
@@ -226,22 +201,6 @@ public final class FlinkLineageSupport {
             LOGGER.warn("Unable to determine whether the Flink submission is attached", error);
             return false;
         }
-    }
-
-    private static Method findJobStatusHookMethod() {
-        try {
-            Class<?> hookType = Class.forName(JOB_STATUS_HOOK);
-            for (Method method : StreamGraph.class.getMethods()) {
-                if ("registerJobStatusHook".equals(method.getName())
-                        && method.getParameterCount() == 1
-                        && method.getParameterTypes()[0].equals(hookType)) {
-                    return method;
-                }
-            }
-        } catch (Throwable error) {
-            LOGGER.debug("Flink status-hook API is unavailable", error);
-        }
-        return null;
     }
 
     /**
@@ -355,142 +314,5 @@ public final class FlinkLineageSupport {
                             .build());
         }
         return events;
-    }
-
-    private static final class JobListenerInvocationHandler implements InvocationHandler {
-        private final LineageConfig config;
-        private final List<LineageEvent> events;
-
-        private JobListenerInvocationHandler(LineageConfig config, List<LineageEvent> events) {
-            this.config = config;
-            this.events = events;
-        }
-
-        @Override
-        public Object invoke(Object proxy, Method method, Object[] args) {
-            try {
-                if (!"onJobExecuted".equals(method.getName())
-                        || args == null
-                        || args.length < 2
-                        || !(args[0] instanceof JobExecutionResult)
-                        || !isAttachedJobExecutionResult(
-                                (JobExecutionResult) args[0], (Throwable) args[1])) {
-                    return ProxyReturnValues.defaultFor(method);
-                }
-                JobExecutionResult result = (JobExecutionResult) args[0];
-                Map<String, Object> accumulators = result.getAllAccumulatorResults();
-                Long rowCount = number(accumulators.get(MetricNames.SINK_WRITE_COUNT));
-                Long size = number(accumulators.get(MetricNames.SINK_WRITE_BYTES));
-                LineageOutputStatistics statistics =
-                        positive(rowCount) || positive(size)
-                                ? new LineageOutputStatistics(rowCount, size, "attempted")
-                                : null;
-                LineageConfig runtimeConfig =
-                        config.withAuthToken(
-                                LineageConfig.resolveToken(
-                                        FlinkClusterOptions.load(), System.getenv()));
-                String flinkJobId = result.getJobID() == null ? null : result.getJobID().toString();
-                for (LineageEvent event : events) {
-                    // Emitted even without statistics: an attached submission silences the
-                    // JobManager hook, so skipping here would leave the run with no terminal event
-                    // at all rather than one that is merely missing its row counts.
-                    LineageEvent completed =
-                            statistics == null ? event : event.withOutputStatistics(statistics);
-                    LineageRuntime.emit(
-                            runtimeConfig,
-                            completed
-                                    .withEventType(LineageEventType.COMPLETE)
-                                    .withRunProperty(
-                                            LineageJobStatusHook.FLINK_JOB_ID_PROPERTY,
-                                            flinkJobId));
-                }
-            } catch (Throwable error) {
-                LOGGER.warn("Failed to emit Flink output statistics", error);
-            }
-            return ProxyReturnValues.defaultFor(method);
-        }
-
-        private static Long number(Object value) {
-            return value instanceof Number ? ((Number) value).longValue() : null;
-        }
-
-        private static boolean positive(Long value) {
-            return value != null && value > 0;
-        }
-    }
-
-    public static final class Registration {
-        private final StreamGraph streamGraph;
-
-        private Registration(StreamGraph streamGraph) {
-            this.streamGraph = streamGraph;
-        }
-
-        public StreamGraph getStreamGraph() {
-            return streamGraph;
-        }
-    }
-
-    private static Boolean enabledValue(Map<?, ?> values) {
-        OptionValue option = findOption(values, LineageConfig.ENABLED);
-        if (!option.present) {
-            return null;
-        }
-        return option.value != null && Boolean.parseBoolean(String.valueOf(option.value));
-    }
-
-    private static Boolean enabledEnvironmentValue(Map<?, ?> values) {
-        if (values == null || values.isEmpty()) {
-            return null;
-        }
-        String key = LineageConfig.ENABLED.toUpperCase(Locale.ROOT);
-        if (!values.containsKey(key)) {
-            return null;
-        }
-        Object value = values.get(key);
-        return value != null && Boolean.parseBoolean(String.valueOf(value));
-    }
-
-    private static OptionValue findOption(Map<?, ?> values, String key) {
-        if (values == null || values.isEmpty()) {
-            return OptionValue.absent();
-        }
-        if (values.containsKey(key)) {
-            return OptionValue.of(values.get(key));
-        }
-        String dotted = key.replace('_', '.');
-        if (values.containsKey(dotted)) {
-            return OptionValue.of(values.get(dotted));
-        }
-        Object nested = values.get("openlineage");
-        if (nested instanceof Map) {
-            Map<?, ?> nestedOptions = (Map<?, ?>) nested;
-            String suffix = key.substring("openlineage_".length());
-            if (nestedOptions.containsKey(suffix)) {
-                return OptionValue.of(nestedOptions.get(suffix));
-            }
-            if (nestedOptions.containsKey(key)) {
-                return OptionValue.of(nestedOptions.get(key));
-            }
-        }
-        return OptionValue.absent();
-    }
-
-    private static final class OptionValue {
-        private final boolean present;
-        private final Object value;
-
-        private OptionValue(boolean present, Object value) {
-            this.present = present;
-            this.value = value;
-        }
-
-        private static OptionValue of(Object value) {
-            return new OptionValue(true, value);
-        }
-
-        private static OptionValue absent() {
-            return new OptionValue(false, null);
-        }
     }
 }

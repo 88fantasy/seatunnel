@@ -156,7 +156,10 @@ the Flink 1.13 and 1.15 starters do not register this hook.
 Exactly one side reports a successful Flink job, so a run never receives two `COMPLETE` events. An
 attached submission reports it from the client, which is the only place the output statistics are
 readable; a detached submission reports it from the JobManager status hook, without statistics.
-`FAIL` and `ABORT` always come from the status hook.
+`FAIL` and `ABORT` come from the status hook, except for a job that never started: a submission
+that fails — no available slots, a rejected credential, or a JobManager that cannot load the status
+hook — is reported as `FAIL` by the client, because no hook runs for a job the cluster never
+created.
 
 Besides the properties configured through `openlineage_run_properties`, the run facet carries an
 `engine` property (`zeta` or `flink`). Zeta additionally reports `sink_action`, and Flink reports

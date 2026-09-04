@@ -41,6 +41,7 @@ import org.apache.seatunnel.translation.flink.metric.FlinkJobMetricsSummary;
 
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.RuntimeExecutionMode;
+import org.apache.flink.streaming.api.graph.StreamGraph;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -181,7 +182,7 @@ public class FlinkExecution implements TaskExecution {
         }
         try {
             final long jobStartTime = System.currentTimeMillis();
-            FlinkLineageSupport.Registration lineageRegistration =
+            StreamGraph lineageStreamGraph =
                     lineageConfig.enabled()
                             ? FlinkLineageSupport.register(
                                     flinkRuntimeEnvironment.getStreamExecutionEnvironment(),
@@ -192,13 +193,13 @@ public class FlinkExecution implements TaskExecution {
                                     flinkRuntimeEnvironment.getJobName())
                             : null;
             JobExecutionResult jobResult =
-                    lineageRegistration == null
+                    lineageStreamGraph == null
                             ? flinkRuntimeEnvironment
                                     .getStreamExecutionEnvironment()
                                     .execute(flinkRuntimeEnvironment.getJobName())
                             : flinkRuntimeEnvironment
                                     .getStreamExecutionEnvironment()
-                                    .execute(lineageRegistration.getStreamGraph());
+                                    .execute(lineageStreamGraph);
             final long jobEndTime = System.currentTimeMillis();
 
             final FlinkJobMetricsSummary jobMetricsSummary =

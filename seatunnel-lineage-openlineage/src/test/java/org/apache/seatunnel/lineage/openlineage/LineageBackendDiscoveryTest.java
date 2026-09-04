@@ -18,9 +18,8 @@
 package org.apache.seatunnel.lineage.openlineage;
 
 import org.apache.seatunnel.lineage.LineageBackend;
+import org.apache.seatunnel.lineage.LineageBackendLoader;
 import org.apache.seatunnel.lineage.LineageConfig;
-import org.apache.seatunnel.lineage.LineageReporter;
-import org.apache.seatunnel.lineage.LineageReporterFactory;
 
 import org.junit.jupiter.api.Test;
 
@@ -59,18 +58,18 @@ class LineageBackendDiscoveryTest {
     }
 
     @Test
-    void enabledConfigResolvesARealReporterRatherThanFailing() {
+    void enabledConfigResolvesTheHttpBackendRatherThanFailing() {
         Map<String, Object> options = new HashMap<>();
         options.put(LineageConfig.ENABLED, true);
         options.put(LineageConfig.URL, "http://127.0.0.1:1/api/lineage");
         LineageConfig config =
                 LineageConfig.resolve(options, Collections.emptyMap(), Collections.emptyMap());
 
-        LineageReporter reporter = LineageReporterFactory.create(config);
+        LineageBackend backend = LineageBackendLoader.load(config);
 
-        assertNotNull(reporter);
+        assertNotNull(backend);
         assertTrue(
-                reporter.getClass().getName().contains("DefaultLineageReporter"),
-                "an enabled configuration must resolve the SPI-backed reporter, not the no-op one");
+                backend instanceof OpenLineageBackend,
+                "the default transport must resolve to the OpenLineage backend, not fail");
     }
 }

@@ -185,7 +185,7 @@ public class JobMaster {
 
     private final Map<Integer, List<SlotProfile>> releasedSlotWhenTaskGroupFinished;
 
-    private final Map<Integer, AtomicLong> lineageHeartbeatTimes = new ConcurrentHashMap<>();
+    private final AtomicLong lineageHeartbeatTime = new AtomicLong();
 
     /** Resolved once on first use; see {@link #resolveLineageConfig()}. */
     private volatile LineageConfig lineageConfig;
@@ -1106,13 +1106,9 @@ public class JobMaster {
         return null;
     }
 
-    /**
-     * Reports a checkpoint-triggered lineage heartbeat for a streaming pipeline.
-     *
-     * @param pipelineId completed checkpoint pipeline identifier
-     */
-    public void reportLineageHeartbeat(int pipelineId) {
-        ZetaLineageReporter.reportHeartbeat(this, pipelineId);
+    /** Reports a checkpoint-triggered lineage heartbeat for a streaming pipeline. */
+    public void reportLineageHeartbeat() {
+        ZetaLineageReporter.reportHeartbeat(this);
     }
 
     /**
@@ -1129,8 +1125,9 @@ public class JobMaster {
         return JobMetricsUtil.toJobMetrics(getCurrJobMetrics());
     }
 
-    Map<Integer, AtomicLong> getLineageHeartbeatTimes() {
-        return lineageHeartbeatTimes;
+    /** Returns the job-wide timestamp of the last emitted lineage heartbeat. */
+    AtomicLong getLineageHeartbeatTime() {
+        return lineageHeartbeatTime;
     }
 
     /**

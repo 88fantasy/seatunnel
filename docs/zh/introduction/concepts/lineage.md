@@ -143,7 +143,9 @@ SeaTunnel starter 中对应 Flink 1.20 路径，Flink 1.13 和 1.15 starter 不�
 
 Flink 作业成功结束时只有一侧上报终态事件，因此同一个 run 不会收到两次 `COMPLETE`。attached
 提交由客户端上报，因为只有客户端能读到输出统计；detached 提交由 JobManager 的 status hook
-上报，不带统计信息。`FAIL` 和 `ABORT` 始终由 status hook 上报。
+上报，不带统计信息。`FAIL` 和 `ABORT` 由 status hook 上报，作业根本没有启动的情况除外：提交失败时——没有可用 slot、
+凭据被拒绝，或者 JobManager 无法加载 status hook——由客户端上报 `FAIL`，因为集群从未创建过这个
+作业，也就不会有 hook 运行。
 
 除 `openlineage_run_properties` 配置的属性外，run facet 还会携带 `engine` 属性（`zeta` 或
 `flink`）。Zeta 额外上报 `sink_action`，Flink 在终态事件上报 `flink_job_id`。runId 在作业提交前

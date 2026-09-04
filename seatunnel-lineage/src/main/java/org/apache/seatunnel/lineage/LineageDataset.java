@@ -30,8 +30,8 @@ public final class LineageDataset implements Serializable {
 
     private LineageDataset(
             String namespace, String name, LineageOutputStatistics outputStatistics) {
-        this.namespace = requireText(namespace, "namespace");
-        this.name = requireText(name, "name");
+        this.namespace = LineageValidation.requireText(namespace, "namespace");
+        this.name = LineageValidation.requireText(name, "name");
         this.outputStatistics = outputStatistics;
     }
 
@@ -75,12 +75,5 @@ public final class LineageDataset implements Serializable {
     @Override
     public int hashCode() {
         return Objects.hash(namespace, name);
-    }
-
-    private static String requireText(String value, String field) {
-        if (value == null || value.trim().isEmpty()) {
-            throw new IllegalArgumentException(field + " must not be blank");
-        }
-        return value;
     }
 }

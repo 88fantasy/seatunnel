@@ -18,7 +18,6 @@
 package org.apache.seatunnel.core.starter.flink.execution;
 
 import org.apache.seatunnel.lineage.LineageConfig;
-import org.apache.seatunnel.lineage.flink.LineageJobStatusHook;
 
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.JobID;
@@ -88,21 +87,16 @@ class FlinkLineageSupportTest {
     }
 
     /**
-     * Asserted against whatever Flink is on the classpath rather than against this module's 1.15
-     * pin, so the test still describes the contract if that pin ever moves. The registration path
-     * itself is covered where the hook API exists, in seatunnel-flink-20-starter.
+     * This starter compiles against Flink 1.15, which has no {@code JobStatusHook}, so its {@code
+     * FlinkLineageHooks} answers that lineage is unsupported and {@code FlinkExecution} warns
+     * instead of reporting. The 1.20 starter overrides that class and asserts the opposite; the
+     * registration path itself is covered there.
      */
     @Test
-    void shouldReportStatusHookSupportFromTheRuntimeOnTheClasspath() {
-        boolean statusHookApiPresent;
-        try {
-            Class.forName("org.apache.flink.core.execution.JobStatusHook");
-            statusHookApiPresent = true;
-        } catch (ClassNotFoundException absent) {
-            statusHookApiPresent = false;
-        }
-
-        Assertions.assertEquals(statusHookApiPresent, FlinkLineageSupport.isSupported());
+    void shouldReportTheStatusHookApiAsUnsupportedOnThisStarter() {
+        Assertions.assertFalse(
+                FlinkLineageSupport.isSupported(),
+                "a starter compiled against Flink 1.15 cannot register a job status hook");
     }
 
     @Test
@@ -126,7 +120,7 @@ class FlinkLineageSupportTest {
      */
     @Test
     void explainsAJobManagerThatCannotLoadTheStatusHook() {
-        String hookClass = LineageJobStatusHook.class.getName();
+        String hookClass = FlinkLineageSupport.HOOK_HANDLER_CLASS;
         Exception submissionFailure =
                 new RuntimeException(
                         "Failed to submit JobGraph.",
@@ -154,7 +148,7 @@ class FlinkLineageSupportTest {
      */
     @Test
     void explainsAMissingHookRelayedAsTextAcrossTheRestBoundary() {
-        String hookClass = LineageJobStatusHook.class.getName();
+        String hookClass = FlinkLineageSupport.HOOK_HANDLER_CLASS;
         Exception submissionFailure =
                 new RuntimeException(
                         "Failed to submit job.",
@@ -194,7 +188,7 @@ class FlinkLineageSupportTest {
                                         + " java.lang.ClassNotFoundException:"
                                         + " com.example.SomeConnector at"
                                         + " JobSubmitHandler.loadJobGraph; JobGraph hooks: ["
-                                        + LineageJobStatusHook.class.getName()
+                                        + FlinkLineageSupport.HOOK_HANDLER_CLASS
                                         + "]>]")));
         // Naming the hook class is not enough on its own: only a class-loading failure means the
         // artifact is missing from the JobManager.
@@ -202,7 +196,7 @@ class FlinkLineageSupportTest {
                 FlinkLineageSupport.describeMissingHookClass(
                         new IllegalStateException(
                                 "Could not serialize "
-                                        + LineageJobStatusHook.class.getName()
+                                        + FlinkLineageSupport.HOOK_HANDLER_CLASS
                                         + ": java.io.NotSerializableException")));
     }
 }

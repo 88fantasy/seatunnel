@@ -162,4 +162,73 @@ class LineageConfigTest {
                         LineageConfig.resolve(
                                 Collections.emptyMap(), Collections.emptyMap(), environment));
     }
+
+    /**
+     * The separators of the string map form are also legal inside a value: a team name carries a
+     * comma and a URL carries a colon. Quoting is the only way to write either, so the parser must
+     * keep the quoted section intact instead of splitting inside it.
+     */
+    @Test
+    void keepsSeparatorsThatAppearInsideQuotedRunPropertyValues() {
+        Map<String, Object> cluster =
+                Collections.singletonMap(
+                        "openlineage.run_properties",
+                        "owner: \"data, platform\", docs: 'http://wiki/x', plain: value");
+
+        LineageConfig config =
+                LineageConfig.resolve(Collections.emptyMap(), cluster, Collections.emptyMap());
+
+        assertEquals("data, platform", config.runProperties().get("owner"));
+        assertEquals("http://wiki/x", config.runProperties().get("docs"));
+        assertEquals("value", config.runProperties().get("plain"));
+    }
+
+    /**
+     * A duration written the way the rest of SeaTunnel accepts one is the likely mistake here. The
+     * configuration is resolved again on every reported event, so a failure that names only the
+     * text repeats forever in a log that never says which of the numeric options to correct.
+     */
+    @Test
+    void namesTheNumericOptionThatCouldNotBeParsed() {
+        Map<String, Object> job = Collections.singletonMap(LineageConfig.TIMEOUT_MS, "10s");
+
+        IllegalArgumentException failure =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () ->
+                                LineageConfig.resolve(
+                                        job, Collections.emptyMap(), Collections.emptyMap()));
+
+        assertTrue(failure.getMessage().contains(LineageConfig.TIMEOUT_MS), failure.getMessage());
+        assertTrue(failure.getMessage().contains("10s"), failure.getMessage());
+    }
+
+    @Test
+    void namesTheHeartbeatOptionThatCouldNotBeParsed() {
+        Map<String, Object> cluster =
+                Collections.singletonMap("openlineage.heartbeat_min_interval_ms", "1h");
+
+        IllegalArgumentException failure =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () ->
+                                LineageConfig.resolve(
+                                        Collections.emptyMap(), cluster, Collections.emptyMap()));
+
+        assertTrue(
+                failure.getMessage().contains(LineageConfig.HEARTBEAT_MIN_INTERVAL_MS),
+                failure.getMessage());
+    }
+
+    @Test
+    void rejectsRunPropertiesThatEndInsideAQuote() {
+        Map<String, Object> cluster =
+                Collections.singletonMap("openlineage.run_properties", "owner: \"unterminated");
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        LineageConfig.resolve(
+                                Collections.emptyMap(), cluster, Collections.emptyMap()));
+    }
 }

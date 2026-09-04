@@ -38,18 +38,29 @@ import static org.mockito.Mockito.mock;
 
 class SourceSinkActionCompatibilityTest {
 
+    /**
+     * Pins the identifiers a savepoint written by an earlier release is deserialized under.
+     *
+     * <p>Both classes gained a {@code lineageDatasets} field. Neither declared a {@code
+     * serialVersionUID} before that, so both ran on the identifier Java computes from the class
+     * structure, and adding a field changes that computed value. The literals here are the computed
+     * values from before the field was added, so declaring them keeps an older stream loadable; the
+     * stream's missing field is covered by {@link
+     * #shouldReturnEmptyLineageDatasetsWhenLegacyStreamHasNoField}.
+     *
+     * <p>What this asserts is that the declared identifiers are still these values, which is what a
+     * later structural change would silently break. It cannot re-derive them: the class they came
+     * from no longer exists in this build, so their provenance is the paragraph above and not an
+     * assertion.
+     */
     @Test
-    void shouldKeepStableSerialVersionUids() throws Exception {
+    void shouldKeepStableSerialVersionUids() {
         Assertions.assertEquals(
                 -4104531889750766731L,
                 ObjectStreamClass.lookup(SourceAction.class).getSerialVersionUID());
         Assertions.assertEquals(
                 -8715419530793414312L,
                 ObjectStreamClass.lookup(SinkAction.class).getSerialVersionUID());
-        Assertions.assertEquals(
-                -4104531889750766731L, serialVersionUidField(SourceAction.class).getLong(null));
-        Assertions.assertEquals(
-                -8715419530793414312L, serialVersionUidField(SinkAction.class).getLong(null));
     }
 
     @Test
@@ -92,12 +103,6 @@ class SourceSinkActionCompatibilityTest {
 
         Assertions.assertEquals(configured, sourceAction.getLineageDatasets());
         Assertions.assertNotSame(configured, sourceAction.getLineageDatasets());
-    }
-
-    private static Field serialVersionUidField(Class<?> type) throws Exception {
-        Field field = type.getDeclaredField("serialVersionUID");
-        field.setAccessible(true);
-        return field;
     }
 
     private static void setLineageDatasets(Object action, List<LineageDataset> datasets)

@@ -1104,7 +1104,7 @@ public class CheckpointCoordinatorTest
                                             () ->
                                                     new IllegalStateException(
                                                             "checkpointManager field not found"));
-            Mockito.verify(checkpointManager).reportLineageHeartbeat(1);
+            Mockito.verify(checkpointManager).reportLineageHeartbeat();
         } finally {
             executorService.shutdownNow();
         }

@@ -67,14 +67,36 @@ public final class OpenLineageBackend implements LineageBackend {
         if (!config.enabled()) {
             return;
         }
+        String payload;
         try {
-            sendWithRetry(config, OpenLineageEventConverter.toJson(event));
+            payload = OpenLineageEventConverter.toJson(event);
         } catch (Throwable failure) {
+            LOGGER.warn("Failed to render an OpenLineage event as JSON", failure);
+            return;
+        }
+        try {
+            sendWithRetry(config, payload);
+        } catch (IllegalArgumentException configurationError) {
+            // Reported apart from a delivery failure because it names the option to correct rather
+            // than a receiver to investigate. The failure's own message is deliberately left out:
+            // a malformed endpoint is reported by quoting it in full, credentials included, which
+            // is exactly what endpointSummary exists to keep out of the log.
             LOGGER.warn(
-                    "Failed to send OpenLineage event to endpoint {} after {} attempt(s); failure type {}",
+                    "Failed to send OpenLineage event: {} is missing or is not a usable endpoint"
+                            + " ({})",
+                    LineageConfig.URL,
+                    endpointSummary(config.url()));
+        } catch (Throwable failure) {
+            // The message carries what the run actually needs: the HTTP status of a rejected
+            // request, the TLS or connection failure behind an unreachable one. The cause is
+            // passed as well so the stack survives; without both, every failure is logged as an
+            // indistinguishable IOException.
+            LOGGER.warn(
+                    "Failed to send OpenLineage event to endpoint {} after {} attempt(s): {}",
                     endpointSummary(config.url()),
                     config.retryTimes() + 1,
-                    failure.getClass().getName());
+                    failure.toString(),
+                    failure);
         }
     }
 
@@ -84,6 +106,10 @@ public final class OpenLineageBackend implements LineageBackend {
             try {
                 sendOnce(config, payload);
                 return;
+            } catch (IllegalArgumentException configurationError) {
+                // A missing or malformed endpoint fails identically on every attempt, so retrying
+                // only multiplies the sleep by the retry count on every event of the job.
+                throw configurationError;
             } catch (Exception e) {
                 failure = e;
                 if (attempt < config.retryTimes()) {

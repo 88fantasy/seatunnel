@@ -45,10 +45,10 @@ public final class LineageEvent implements Serializable {
         this.runId = require(builder.runId, "runId");
         this.eventTime = require(builder.eventTime, "eventTime");
         this.eventType = require(builder.eventType, "eventType");
-        this.jobNamespace = requireText(builder.jobNamespace, "jobNamespace");
-        this.jobName = requireText(builder.jobName, "jobName");
-        this.producer = requireText(builder.producer, "producer");
-        this.runFacet = requireText(builder.runFacet, "runFacet");
+        this.jobNamespace = LineageValidation.requireText(builder.jobNamespace, "jobNamespace");
+        this.jobName = LineageValidation.requireText(builder.jobName, "jobName");
+        this.producer = LineageValidation.requireText(builder.producer, "producer");
+        this.runFacet = LineageValidation.requireText(builder.runFacet, "runFacet");
         this.runProperties =
                 Collections.unmodifiableMap(new LinkedHashMap<>(builder.runProperties));
         this.inputs = Collections.unmodifiableList(new ArrayList<>(builder.inputs));
@@ -60,19 +60,26 @@ public final class LineageEvent implements Serializable {
         return new Builder();
     }
 
-    /** Returns a copy with a different lifecycle event type and a fresh event time. */
-    public LineageEvent withEventType(LineageEventType type) {
+    /** Returns a builder pre-populated with every field of this event. */
+    private Builder toBuilder() {
         return builder()
                 .runId(runId)
-                .eventTime(ZonedDateTime.now(eventTime.getZone()))
-                .eventType(type)
+                .eventTime(eventTime)
+                .eventType(eventType)
                 .jobNamespace(jobNamespace)
                 .jobName(jobName)
                 .producer(producer)
                 .runFacet(runFacet)
                 .runProperties(runProperties)
                 .inputs(inputs)
-                .outputs(outputs)
+                .outputs(outputs);
+    }
+
+    /** Returns a copy with a different lifecycle event type and a fresh event time. */
+    public LineageEvent withEventType(LineageEventType type) {
+        return toBuilder()
+                .eventTime(ZonedDateTime.now(eventTime.getZone()))
+                .eventType(type)
                 .build();
     }
 
@@ -93,18 +100,7 @@ public final class LineageEvent implements Serializable {
         }
         Map<String, Object> updatedProperties = new LinkedHashMap<>(runProperties);
         updatedProperties.put(key, value);
-        return builder()
-                .runId(runId)
-                .eventTime(eventTime)
-                .eventType(eventType)
-                .jobNamespace(jobNamespace)
-                .jobName(jobName)
-                .producer(producer)
-                .runFacet(runFacet)
-                .runProperties(updatedProperties)
-                .inputs(inputs)
-                .outputs(outputs)
-                .build();
+        return toBuilder().runProperties(updatedProperties).build();
     }
 
     /** Returns a copy with the same statistics attached to every output dataset. */
@@ -113,16 +109,8 @@ public final class LineageEvent implements Serializable {
         for (LineageDataset output : outputs) {
             updatedOutputs.add(output.withOutputStatistics(statistics));
         }
-        return builder()
-                .runId(runId)
+        return toBuilder()
                 .eventTime(ZonedDateTime.now(eventTime.getZone()))
-                .eventType(eventType)
-                .jobNamespace(jobNamespace)
-                .jobName(jobName)
-                .producer(producer)
-                .runFacet(runFacet)
-                .runProperties(runProperties)
-                .inputs(inputs)
                 .outputs(updatedOutputs)
                 .build();
     }
@@ -262,13 +250,6 @@ public final class LineageEvent implements Serializable {
     private static <T> T require(T value, String field) {
         if (value == null) {
             throw new IllegalArgumentException(field + " must not be null");
-        }
-        return value;
-    }
-
-    private static String requireText(String value, String field) {
-        if (value == null || value.trim().isEmpty()) {
-            throw new IllegalArgumentException(field + " must not be blank");
         }
         return value;
     }

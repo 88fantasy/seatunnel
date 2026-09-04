@@ -17,15 +17,21 @@
 
 package org.apache.seatunnel.lineage;
 
-/** Emits the three lifecycle meanings required by the lineage receiver. */
-public interface LineageReporter {
+/**
+ * Argument checks shared by the lineage contract classes.
+ *
+ * <p>This module carries no dependencies so that it can be shaded into the Flink {@code lib}
+ * directory, which rules out {@code StringUtils} and the usual precondition helpers.
+ */
+final class LineageValidation {
 
-    /** Reports the beginning of a run. */
-    void start(LineageEvent event);
+    private LineageValidation() {}
 
-    /** Reports a cumulative progress update for a run. */
-    void heartbeat(LineageEvent event);
-
-    /** Reports the terminal result of a run. */
-    void complete(LineageEvent event);
+    /** Returns the value, rejecting null and whitespace-only text for a required field. */
+    static String requireText(String value, String field) {
+        if (value == null || value.trim().isEmpty()) {
+            throw new IllegalArgumentException(field + " must not be blank");
+        }
+        return value;
+    }
 }

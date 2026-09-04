@@ -50,7 +50,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -165,12 +164,10 @@ class ZetaLineageReporterTest {
     @Test
     void shouldThrottleHeartbeatsAcrossPipelinesForOneJob() throws Exception {
         JobMaster jobMaster = mock(JobMaster.class, CALLS_REAL_METHODS);
-        doReturn(new ConcurrentHashMap<Integer, AtomicLong>())
-                .when(jobMaster)
-                .getLineageHeartbeatTimes();
+        doReturn(new AtomicLong()).when(jobMaster).getLineageHeartbeatTime();
 
-        Assertions.assertTrue(invokeShouldReportHeartbeat(jobMaster, 1, Long.MAX_VALUE));
-        Assertions.assertFalse(invokeShouldReportHeartbeat(jobMaster, 2, Long.MAX_VALUE));
+        Assertions.assertTrue(invokeShouldReportHeartbeat(jobMaster, Long.MAX_VALUE));
+        Assertions.assertFalse(invokeShouldReportHeartbeat(jobMaster, Long.MAX_VALUE));
     }
 
     /**
@@ -183,7 +180,7 @@ class ZetaLineageReporterTest {
     void shouldNotReportHeartbeatsWhenTheIntervalDisablesThem() {
         JobMaster disabled = streamingJobMaster(0L);
 
-        ZetaLineageReporter.reportHeartbeat(disabled, 1);
+        ZetaLineageReporter.reportHeartbeat(disabled);
 
         verify(disabled, never()).submitLineageEmission(any());
 
@@ -191,7 +188,7 @@ class ZetaLineageReporterTest {
         // merely because the mock never reached the throttle.
         JobMaster reporting = streamingJobMaster(1L);
 
-        ZetaLineageReporter.reportHeartbeat(reporting, 1);
+        ZetaLineageReporter.reportHeartbeat(reporting);
 
         verify(reporting).submitLineageEmission(any());
     }
@@ -207,7 +204,7 @@ class ZetaLineageReporterTest {
         JobMaster jobMaster = streamingJobMaster(1L);
         ArgumentCaptor<Runnable> emission = ArgumentCaptor.forClass(Runnable.class);
 
-        ZetaLineageReporter.reportHeartbeat(jobMaster, 1);
+        ZetaLineageReporter.reportHeartbeat(jobMaster);
         verify(jobMaster).submitLineageEmission(emission.capture());
 
         // The plan thread reached the end state after the heartbeat passed its own check.
@@ -241,9 +238,7 @@ class ZetaLineageReporterTest {
         doReturn(jobConfig).when(information).getJobConfig();
         doReturn(information).when(jobMaster).getJobImmutableInformation();
 
-        doReturn(new ConcurrentHashMap<Integer, AtomicLong>())
-                .when(jobMaster)
-                .getLineageHeartbeatTimes();
+        doReturn(new AtomicLong()).when(jobMaster).getLineageHeartbeatTime();
         doNothing().when(jobMaster).submitLineageEmission(any());
         return jobMaster;
     }
@@ -377,9 +372,13 @@ class ZetaLineageReporterTest {
             throws Exception {
         Method method =
                 ZetaLineageReporter.class.getDeclaredMethod(
-                        "sourceDatasets", LogicalDag.class, Long.class);
+                        "sourceDatasets", LogicalDag.class, Map.class, Long.class);
         method.setAccessible(true);
-        return (List<LineageDataset>) method.invoke(null, dag, sinkVertexId);
+        Method index =
+                ZetaLineageReporter.class.getDeclaredMethod("upstreamIndex", LogicalDag.class);
+        index.setAccessible(true);
+        return (List<LineageDataset>)
+                method.invoke(null, dag, index.invoke(null, dag), sinkVertexId);
     }
 
     private static JobMetrics invokeOutputMetrics(JobMaster jobMaster, LineageEventType eventType)
@@ -406,13 +405,13 @@ class ZetaLineageReporterTest {
         return jobMaster;
     }
 
-    private static boolean invokeShouldReportHeartbeat(
-            JobMaster jobMaster, int pipelineId, long minimumIntervalMs) throws Exception {
+    private static boolean invokeShouldReportHeartbeat(JobMaster jobMaster, long minimumIntervalMs)
+            throws Exception {
         Method method =
                 ZetaLineageReporter.class.getDeclaredMethod(
-                        "shouldReportHeartbeat", JobMaster.class, int.class, long.class);
+                        "shouldReportHeartbeat", JobMaster.class, long.class);
         method.setAccessible(true);
-        return (boolean) method.invoke(null, jobMaster, pipelineId, minimumIntervalMs);
+        return (boolean) method.invoke(null, jobMaster, minimumIntervalMs);
     }
 
     private static JobMetrics metrics(String value) {

@@ -22,25 +22,22 @@ import org.apache.seatunnel.lineage.LineageEvent;
 import org.apache.seatunnel.lineage.LineageEventType;
 import org.apache.seatunnel.lineage.LineageRuntime;
 
+import org.apache.flink.api.common.JobID;
+import org.apache.flink.core.execution.JobStatusHook;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.Serializable;
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Emits the terminal lineage event for a Flink job from the JobManager.
- *
- * <p>This is the handler behind a {@code org.apache.flink.core.execution.JobStatusHook} proxy. It
- * is a proxy rather than a direct implementation so that the Flink starter, which compiles against
- * Flink 1.15, stays source compatible while targeting the 1.16+ hook API.
  *
  * <p>This class is the reason the lineage artifact has to be installed in the Flink cluster's
  * {@code lib/} directory. The hook is a structural field of the JobGraph, so the JobManager
@@ -51,12 +48,10 @@ import java.util.concurrent.TimeUnit;
  * storage. It therefore carries no credential: the caller strips the token, and the token is
  * resolved again on the JobManager from its own cluster configuration and process environment.
  */
-public final class LineageJobStatusHook implements InvocationHandler, Serializable {
+public final class LineageJobStatusHook implements JobStatusHook {
     private static final long serialVersionUID = 1L;
 
     private static final Logger LOGGER = LoggerFactory.getLogger(LineageJobStatusHook.class);
-
-    private static final String JOB_STATUS_HOOK = "org.apache.flink.core.execution.JobStatusHook";
 
     /** Run-facet property carrying the Flink job identifier shown in the Flink UI and REST API. */
     public static final String FLINK_JOB_ID_PROPERTY = "flink_job_id";
@@ -74,11 +69,12 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
     private transient volatile ScheduledFuture<?> heartbeat;
 
     /**
-     * Set by the terminal callback before its event is emitted, so a heartbeat that is scheduled or
-     * already running cannot report RUNNING after it. Transient for the same reason as the
+     * Set by the terminal callback before its event is submitted, so a heartbeat that is already
+     * queued cannot report RUNNING after it. Written from the job's state-transition thread and
+     * read from the emitting thread, hence volatile. Transient for the same reason as the
      * heartbeat: nothing is terminal on the client that serializes this into the JobGraph.
      */
-    private transient boolean terminal;
+    private transient volatile boolean terminal;
 
     /**
      * @param config lineage configuration with the auth token already removed
@@ -94,50 +90,65 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
     }
 
     @Override
-    public Object invoke(Object proxy, Method method, Object[] args) {
-        try {
-            String methodName = method.getName();
-            if ("toString".equals(methodName)) {
-                return JOB_STATUS_HOOK;
-            }
-            if ("hashCode".equals(methodName)) {
-                return System.identityHashCode(proxy);
-            }
-            if ("equals".equals(methodName)) {
-                return args != null && args.length == 1 && proxy == args[0];
-            }
-            if ("onCreated".equals(methodName)) {
-                startHeartbeat(jobId(args));
-            } else if ("onFinished".equals(methodName)) {
-                stopHeartbeat();
-                // An attached client emits the successful terminal event with the output
-                // statistics read from the job accumulators, which are not reachable from here.
-                // Both events describe the same run, and the later arrival wins on the receiver,
-                // so exactly one of the two may send it.
-                if (!clientReportsCompletion) {
-                    emit(LineageEventType.COMPLETE, jobId(args));
-                }
-            } else if ("onFailed".equals(methodName)) {
-                stopHeartbeat();
-                emit(LineageEventType.FAIL, jobId(args));
-            } else if ("onCanceled".equals(methodName)) {
-                stopHeartbeat();
-                emit(LineageEventType.ABORT, jobId(args));
-            }
-        } catch (Throwable error) {
-            LOGGER.warn("Failed to handle Flink lineage status callback", error);
-        }
-        return ProxyReturnValues.defaultFor(method);
+    public void onCreated(JobID jobId) {
+        guarded(() -> startHeartbeat(jobId(jobId)));
+    }
+
+    @Override
+    public void onFinished(JobID jobId) {
+        guarded(
+                () -> {
+                    stopHeartbeat();
+                    // An attached client emits the successful terminal event with the output
+                    // statistics read from the job accumulators, which are not reachable from here.
+                    // Both events describe the same run, and the later arrival wins on the
+                    // receiver, so exactly one of the two may send it.
+                    if (!clientReportsCompletion) {
+                        submitTerminal(LineageEventType.COMPLETE, jobId(jobId));
+                    }
+                });
+    }
+
+    @Override
+    public void onFailed(JobID jobId, Throwable cause) {
+        guarded(
+                () -> {
+                    stopHeartbeat();
+                    submitTerminal(LineageEventType.FAIL, jobId(jobId));
+                });
+    }
+
+    @Override
+    public void onCanceled(JobID jobId) {
+        guarded(
+                () -> {
+                    stopHeartbeat();
+                    submitTerminal(LineageEventType.ABORT, jobId(jobId));
+                });
     }
 
     /**
-     * Extracts the Flink job identifier passed to every {@code JobStatusHook} callback.
+     * Runs one callback body, absorbing anything it throws.
+     *
+     * <p>Flink invokes these hooks inline from the job's state transition, so an exception escaping
+     * here would fail a job for a lineage problem. Reporting is best effort by contract.
+     */
+    private static void guarded(Runnable callback) {
+        try {
+            callback.run();
+        } catch (Throwable error) {
+            LOGGER.warn("Failed to handle Flink lineage status callback", error);
+        }
+    }
+
+    /**
+     * Renders the Flink job identifier passed to every {@code JobStatusHook} callback.
      *
      * <p>The run ID is derived before submission, when no Flink job ID exists yet, so this is the
      * only point where the lineage run can be tied back to the job visible in the Flink UI.
      */
-    private static String jobId(Object[] args) {
-        return args != null && args.length > 0 && args[0] != null ? String.valueOf(args[0]) : null;
+    private static String jobId(JobID jobId) {
+        return jobId == null ? null : jobId.toString();
     }
 
     /**
@@ -178,16 +189,13 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
     }
 
     /**
-     * Stops the heartbeat before the terminal event, so no RUNNING can follow it.
+     * Stops the heartbeat before the terminal event is queued, so no RUNNING can follow it.
      *
-     * <p>Cancelling is not enough on its own: {@code cancel(false)} does not stop a heartbeat that
-     * is already inside its send, which blocks for as long as the receiver's timeout and retries
-     * allow. Such a RUNNING could reach the receiver after the terminal event and leave the run
-     * marked running forever, which is the failure the heartbeat exists to prevent. Claiming the
-     * emit monitor therefore both publishes the terminal flag, which suppresses any heartbeat that
-     * has not started sending, and waits out one that has. Because the monitor is claimed one event
-     * at a time, the wait is bounded by a single send rather than by the whole run set, and only
-     * ever happens on a job that is already finishing.
+     * <p>Both steps are non-blocking, which is the point: Flink runs this on the job's own state
+     * transition, and waiting here for an in-flight send would hold that thread for a full retry
+     * cycle per output dataset. Cancelling keeps further heartbeats from being scheduled;
+     * publishing the terminal flag makes a heartbeat that is already queued, or already inside its
+     * loop over the runs, give up rather than report RUNNING after the run has closed.
      */
     private void stopHeartbeat() {
         ScheduledFuture<?> scheduled = heartbeat;
@@ -195,19 +203,47 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
             scheduled.cancel(false);
             heartbeat = null;
         }
-        synchronized (this) {
-            terminal = true;
+        terminal = true;
+    }
+
+    /**
+     * Queues the terminal event instead of sending it on the job's state-transition thread.
+     *
+     * <p>A send blocks for the configured timeout on every retry, once per output dataset, so
+     * sending here would hold a JobManager thread for minutes against an unreachable receiver and
+     * make a lineage failure visible as a stalled job. Queueing also keeps the terminal event
+     * behind any heartbeat that is already sending, because the emitting thread runs one task at a
+     * time; see {@link Heartbeats}.
+     */
+    private void submitTerminal(LineageEventType eventType, String flinkJobId) {
+        try {
+            Heartbeats.SCHEDULER.execute(() -> emit(eventType, flinkJobId));
+        } catch (Throwable error) {
+            LOGGER.warn("Failed to submit the terminal Flink lineage event", error);
         }
     }
 
     /**
      * Holds the one scheduler shared by every job on this JobManager.
      *
-     * <p>A single daemon thread rather than one per job: heartbeats are hours apart, and {@code
-     * scheduleWithFixedDelay} lets a slow send push its own next run back instead of piling up.
-     * Daemon so a JobManager shutdown is never held open by it.
+     * <p>Every lineage send of this JobManager runs here, and a single daemon thread is what orders
+     * them: a terminal event queued while a heartbeat is still sending cannot overtake it, so the
+     * receiver never sees RUNNING after a run has closed. One thread rather than one per job also
+     * bounds what a dead receiver can cost the process, and {@code scheduleWithFixedDelay} lets a
+     * slow send push its own next run back instead of piling up. Daemon so a JobManager shutdown is
+     * never held open by it.
      */
     private static final class Heartbeats {
+        /**
+         * How long a shutting-down JobManager waits for queued terminal events.
+         *
+         * <p>Application-mode clusters shut down as soon as the job reaches a terminal state, which
+         * is the same moment the terminal event is queued. Without a wait the run would stay open
+         * on the receiver until its abandoned-run timeout. The wait is short because a reachable
+         * receiver answers in milliseconds and an unreachable one must not delay the shutdown.
+         */
+        private static final long DRAIN_TIMEOUT_MS = 5000;
+
         static final ScheduledExecutorService SCHEDULER =
                 Executors.newSingleThreadScheduledExecutor(
                         runnable -> {
@@ -216,15 +252,57 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
                             return thread;
                         });
 
+        static {
+            Runtime.getRuntime()
+                    .addShutdownHook(new Thread(Heartbeats::drain, "seatunnel-lineage-drain"));
+        }
+
+        /**
+         * Gives already queued terminal events a bounded chance to leave before the JVM exits.
+         *
+         * <p>{@code shutdown} drops the periodic heartbeats and keeps the queued terminal events,
+         * which is exactly the wanted split.
+         */
+        private static void drain() {
+            SCHEDULER.shutdown();
+            try {
+                if (!SCHEDULER.awaitTermination(DRAIN_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                    SCHEDULER.shutdownNow();
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                SCHEDULER.shutdownNow();
+            }
+        }
+
         private Heartbeats() {}
+    }
+
+    /**
+     * Waits until every event queued so far has been sent.
+     *
+     * <p>A test seam. The emitting thread runs one task at a time, so a task queued after the
+     * events under test completes only once they have.
+     *
+     * @return whether the queue drained within the timeout
+     */
+    static boolean awaitPendingEmissions(long timeoutMs) throws InterruptedException {
+        try {
+            Future<?> barrier = Heartbeats.SCHEDULER.submit(() -> {});
+            barrier.get(timeoutMs, TimeUnit.MILLISECONDS);
+            return true;
+        } catch (InterruptedException interrupted) {
+            throw interrupted;
+        } catch (Exception error) {
+            return false;
+        }
     }
 
     /**
      * Sends one lifecycle event for every run this hook owns.
      *
-     * <p>Each send is serialized against the others, so a terminal event never overtakes a
-     * heartbeat that is already being sent, and a heartbeat that was waiting for the monitor sees
-     * the terminal flag and stops. See {@link #stopHeartbeat()}.
+     * <p>Runs only on the shared emitting thread, which orders every send of this JobManager
+     * against every other; see {@link Heartbeats}.
      */
     private void emit(LineageEventType eventType, String flinkJobId) {
         try {
@@ -233,21 +311,16 @@ public final class LineageJobStatusHook implements InvocationHandler, Serializab
                             LineageConfig.resolveToken(
                                     FlinkClusterOptions.load(), System.getenv()));
             for (LineageEvent event : events) {
-                // Claimed per event rather than around the whole loop: a job with many sink
-                // tables sends one event per output dataset, and holding the monitor across all
-                // of them would make a terminal callback wait out every one of them.
-                synchronized (this) {
-                    if (eventType == LineageEventType.RUNNING && terminal) {
-                        // The terminal event owns this run from here on. Abandoning the rest of
-                        // the loop is safe: whatever the terminal callback sends covers every
-                        // run this hook owns.
-                        return;
-                    }
-                    LineageRuntime.emit(
-                            runtimeConfig,
-                            event.withEventType(eventType)
-                                    .withRunProperty(FLINK_JOB_ID_PROPERTY, flinkJobId));
+                if (eventType == LineageEventType.RUNNING && terminal) {
+                    // The terminal event owns this run from here on. Abandoning the rest of the
+                    // loop is safe: whatever the terminal callback sends covers every run this
+                    // hook owns.
+                    return;
                 }
+                LineageRuntime.emit(
+                        runtimeConfig,
+                        event.withEventType(eventType)
+                                .withRunProperty(FLINK_JOB_ID_PROPERTY, flinkJobId));
             }
         } catch (Throwable error) {
             LOGGER.warn("Failed to emit Flink lineage status event", error);

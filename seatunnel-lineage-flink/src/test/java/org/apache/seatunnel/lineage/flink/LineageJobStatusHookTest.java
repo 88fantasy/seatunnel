@@ -22,6 +22,8 @@ import org.apache.seatunnel.lineage.LineageDataset;
 import org.apache.seatunnel.lineage.LineageEvent;
 import org.apache.seatunnel.lineage.LineageEventType;
 
+import org.apache.flink.api.common.JobID;
+
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,8 +32,6 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.Collections;
@@ -44,8 +44,18 @@ import java.util.concurrent.TimeUnit;
 class LineageJobStatusHookTest {
 
     @BeforeEach
-    void resetBackend() {
+    void resetBackend() throws Exception {
+        // The emitting thread is shared by every hook of the process, so an event still queued by
+        // the previous test would otherwise be recorded into this test's list.
+        LineageJobStatusHook.awaitPendingEmissions(5000);
         RecordingLineageBackend.reset();
+    }
+
+    /** Waits for the events the terminal callbacks handed to the emitting thread. */
+    private static void awaitEmissions() throws Exception {
+        Assertions.assertTrue(
+                LineageJobStatusHook.awaitPendingEmissions(5000),
+                "the queued lineage events must have been emitted");
     }
 
     private static LineageConfig config(String token) {
@@ -81,22 +91,19 @@ class LineageJobStatusHookTest {
                 .build();
     }
 
-    @SuppressWarnings("unused")
-    private static void noop() {}
+    private static final JobID JOB_1 = JobID.fromHexString("00000000000000000000000000000001");
+    private static final JobID JOB_2 = JobID.fromHexString("00000000000000000000000000000002");
+    private static final JobID JOB_3 = JobID.fromHexString("00000000000000000000000000000003");
 
     @Test
     void emitsTheTerminalEventTypeThatMatchesTheCallback() throws Throwable {
-        InvocationHandler hook =
+        LineageJobStatusHook hook =
                 new LineageJobStatusHook(config(null), Collections.singletonList(event()), false);
-        Method noop = LineageJobStatusHookTest.class.getDeclaredMethod("noop");
 
-        hook.invoke(new Object(), noop, new Object[] {"job-1"});
-        Assertions.assertTrue(
-                RecordingLineageBackend.EVENTS.isEmpty(), "unknown callbacks emit nothing");
-
-        invoke(hook, "onFinished", "job-1");
-        invoke(hook, "onFailed", "job-2");
-        invoke(hook, "onCanceled", "job-3");
+        hook.onFinished(JOB_1);
+        hook.onFailed(JOB_2, new IllegalStateException("boom"));
+        hook.onCanceled(JOB_3);
+        awaitEmissions();
 
         Assertions.assertEquals(3, RecordingLineageBackend.EVENTS.size());
         Assertions.assertEquals(
@@ -106,7 +113,7 @@ class LineageJobStatusHookTest {
         Assertions.assertEquals(
                 LineageEventType.ABORT, RecordingLineageBackend.EVENTS.get(2).eventType());
         Assertions.assertEquals(
-                "job-2",
+                JOB_2.toString(),
                 RecordingLineageBackend.EVENTS
                         .get(1)
                         .runProperties()
@@ -121,16 +128,18 @@ class LineageJobStatusHookTest {
      */
     @Test
     void leavesTheSuccessfulTerminalEventToAnAttachedClient() throws Throwable {
-        InvocationHandler hook =
+        LineageJobStatusHook hook =
                 new LineageJobStatusHook(config(null), Collections.singletonList(event()), true);
 
-        invoke(hook, "onFinished", "job-1");
+        hook.onFinished(JOB_1);
+        awaitEmissions();
         Assertions.assertTrue(
                 RecordingLineageBackend.EVENTS.isEmpty(),
                 "the attached client owns the successful terminal event");
 
-        invoke(hook, "onFailed", "job-2");
-        invoke(hook, "onCanceled", "job-3");
+        hook.onFailed(JOB_2, new IllegalStateException("boom"));
+        hook.onCanceled(JOB_3);
+        awaitEmissions();
 
         Assertions.assertEquals(2, RecordingLineageBackend.EVENTS.size());
         Assertions.assertEquals(
@@ -160,13 +169,14 @@ class LineageJobStatusHookTest {
                 new String(bytes.toByteArray(), "ISO-8859-1").contains("secret-token"),
                 "a serialized hook must not carry the receiver token");
 
-        Object restored;
+        LineageJobStatusHook restored;
         try (ObjectInputStream in =
                 new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
-            restored = in.readObject();
+            restored = (LineageJobStatusHook) in.readObject();
         }
 
-        invoke((InvocationHandler) restored, "onFinished", "job-9");
+        restored.onFinished(JOB_1);
+        awaitEmissions();
         Assertions.assertEquals(1, RecordingLineageBackend.EVENTS.size());
         Assertions.assertEquals(
                 LineageEventType.COMPLETE, RecordingLineageBackend.EVENTS.get(0).eventType());
@@ -185,37 +195,11 @@ class LineageJobStatusHookTest {
                         Collections.<String, Object>emptyMap(),
                         Collections.<String, Object>emptyMap());
 
-        InvocationHandler hook =
+        LineageJobStatusHook hook =
                 new LineageJobStatusHook(broken, Collections.singletonList(event()), false);
 
-        Assertions.assertDoesNotThrow(() -> invoke(hook, "onFinished", "job-1"));
-        Assertions.assertTrue(RecordingLineageBackend.EVENTS.isEmpty());
-    }
-
-    @Test
-    void answersObjectMethodsWithoutEmitting() throws Throwable {
-        InvocationHandler hook =
-                new LineageJobStatusHook(config(null), Collections.singletonList(event()), false);
-        Object proxy = new Object();
-
-        Assertions.assertEquals(
-                "org.apache.flink.core.execution.JobStatusHook",
-                hook.invoke(proxy, Object.class.getMethod("toString"), null));
-        Assertions.assertEquals(
-                System.identityHashCode(proxy),
-                hook.invoke(proxy, Object.class.getMethod("hashCode"), null));
-        Assertions.assertEquals(
-                Boolean.TRUE,
-                hook.invoke(
-                        proxy,
-                        Object.class.getMethod("equals", Object.class),
-                        new Object[] {proxy}));
-        Assertions.assertEquals(
-                Boolean.FALSE,
-                hook.invoke(
-                        proxy,
-                        Object.class.getMethod("equals", Object.class),
-                        new Object[] {new Object()}));
+        Assertions.assertDoesNotThrow(() -> hook.onFinished(JOB_1));
+        awaitEmissions();
         Assertions.assertTrue(RecordingLineageBackend.EVENTS.isEmpty());
     }
 
@@ -225,11 +209,11 @@ class LineageJobStatusHookTest {
      */
     @Test
     void emitsHeartbeatsWhileTheJobRunsAndStopsAtTheTerminalEvent() throws Throwable {
-        InvocationHandler hook =
+        LineageJobStatusHook hook =
                 new LineageJobStatusHook(
                         config(null, 30L), Collections.singletonList(event()), false);
 
-        invoke(hook, "onCreated", "job-1");
+        hook.onCreated(JOB_1);
 
         long deadlineMs = System.currentTimeMillis() + 5000;
         while (RecordingLineageBackend.EVENTS.size() < 2
@@ -243,11 +227,12 @@ class LineageJobStatusHookTest {
         for (LineageEvent emitted : RecordingLineageBackend.EVENTS) {
             Assertions.assertEquals(LineageEventType.RUNNING, emitted.eventType());
             Assertions.assertEquals(
-                    "job-1",
+                    JOB_1.toString(),
                     emitted.runProperties().get(LineageJobStatusHook.FLINK_JOB_ID_PROPERTY));
         }
 
-        invoke(hook, "onCanceled", "job-1");
+        hook.onCanceled(JOB_1);
+        awaitEmissions();
         int afterTerminal = RecordingLineageBackend.EVENTS.size();
         Assertions.assertEquals(
                 LineageEventType.ABORT,
@@ -265,12 +250,13 @@ class LineageJobStatusHookTest {
     /** A heartbeat interval of zero disables the heartbeat rather than scheduling a busy loop. */
     @Test
     void doesNotScheduleAHeartbeatWhenTheIntervalIsZero() throws Throwable {
-        InvocationHandler hook =
+        LineageJobStatusHook hook =
                 new LineageJobStatusHook(
                         config(null, 0L), Collections.singletonList(event()), false);
 
-        invoke(hook, "onCreated", "job-1");
+        hook.onCreated(JOB_1);
         Thread.sleep(150);
+        awaitEmissions();
 
         Assertions.assertTrue(
                 RecordingLineageBackend.EVENTS.isEmpty(),
@@ -278,45 +264,38 @@ class LineageJobStatusHookTest {
     }
 
     /**
-     * Cancelling the scheduled heartbeat does not stop one that is already sending, and a send
-     * blocks for as long as the receiver's timeout and retries allow. Without ordering, that
-     * in-flight RUNNING reaches the receiver after the terminal event and leaves the run marked
-     * running forever, which is the state the heartbeat exists to prevent.
+     * Flink runs the terminal callback inline on the job's own state transition, and one send
+     * blocks for a full retry cycle per output dataset. Handing the event to the emitting thread is
+     * what keeps an unreachable receiver from stalling the job's transition, and that thread sends
+     * one event at a time, so the terminal event still leaves after the RUNNING that was already in
+     * flight rather than being overtaken by it.
      */
     @Test
-    void keepsAnInFlightHeartbeatFromOvertakingTheTerminalEvent() throws Throwable {
+    void handsTheTerminalEventOffInsteadOfWaitingForTheSend() throws Throwable {
         RecordingLineageBackend.HEARTBEAT_ENTERED = new CountDownLatch(1);
         RecordingLineageBackend.HEARTBEAT_RELEASE = new CountDownLatch(1);
-        InvocationHandler hook =
+        LineageJobStatusHook hook =
                 new LineageJobStatusHook(
                         config(null, 20L), Collections.singletonList(event()), false);
 
-        invoke(hook, "onCreated", "job-1");
+        hook.onCreated(JOB_1);
         Assertions.assertTrue(
                 RecordingLineageBackend.HEARTBEAT_ENTERED.await(5, TimeUnit.SECONDS),
                 "the heartbeat must have started sending");
 
-        CountDownLatch terminalReturned = new CountDownLatch(1);
-        Thread terminal =
-                new Thread(
-                        () -> {
-                            try {
-                                invoke(hook, "onCanceled", "job-1");
-                                terminalReturned.countDown();
-                            } catch (Throwable error) {
-                                throw new IllegalStateException(error);
-                            }
-                        });
-        terminal.start();
+        long startedAt = System.nanoTime();
+        hook.onCanceled(JOB_1);
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
 
-        Assertions.assertFalse(
-                terminalReturned.await(300, TimeUnit.MILLISECONDS),
-                "the terminal event must wait for the heartbeat that is already sending");
+        Assertions.assertTrue(
+                elapsedMs < 1000,
+                "the terminal callback must not wait for a send, it took " + elapsedMs + "ms");
+        Assertions.assertTrue(
+                RecordingLineageBackend.EVENTS.isEmpty(),
+                "nothing can have been sent while the receiver still holds the heartbeat");
 
         RecordingLineageBackend.HEARTBEAT_RELEASE.countDown();
-        Assertions.assertTrue(
-                terminalReturned.await(5, TimeUnit.SECONDS), "the terminal event must be emitted");
-        terminal.join();
+        awaitEmissions();
 
         Assertions.assertEquals(
                 LineageEventType.RUNNING, RecordingLineageBackend.EVENTS.get(0).eventType());
@@ -333,30 +312,5 @@ class LineageJobStatusHookTest {
                 afterTerminal,
                 RecordingLineageBackend.EVENTS.size(),
                 "no heartbeat may follow the terminal event");
-    }
-
-    /** Calls a JobStatusHook callback the way the proxy does, by name. */
-    private static void invoke(InvocationHandler hook, String callback, String jobId)
-            throws Throwable {
-        Method method =
-                "onFailed".equals(callback)
-                        ? StubHook.class.getMethod(callback, Object.class, Throwable.class)
-                        : StubHook.class.getMethod(callback, Object.class);
-        Object[] args =
-                "onFailed".equals(callback)
-                        ? new Object[] {jobId, new IllegalStateException("boom")}
-                        : new Object[] {jobId};
-        hook.invoke(new Object(), method, args);
-    }
-
-    /** Mirrors the void callbacks of {@code org.apache.flink.core.execution.JobStatusHook}. */
-    private interface StubHook {
-        void onCreated(Object jobId);
-
-        void onFinished(Object jobId);
-
-        void onFailed(Object jobId, Throwable failure);
-
-        void onCanceled(Object jobId);
     }
 }

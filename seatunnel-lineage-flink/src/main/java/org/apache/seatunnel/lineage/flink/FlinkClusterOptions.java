@@ -30,10 +30,6 @@ import java.util.Map;
 public final class FlinkClusterOptions {
     private static final Logger LOGGER = LoggerFactory.getLogger(FlinkClusterOptions.class);
 
-    private static final Object LOCK = new Object();
-
-    private static volatile Map<String, String> cached;
-
     private FlinkClusterOptions() {}
 
     /**
@@ -46,23 +42,21 @@ public final class FlinkClusterOptions {
      * configuration directory.
      */
     public static Map<String, String> load() {
-        Map<String, String> options = cached;
-        if (options != null) {
-            return options;
-        }
-        synchronized (LOCK) {
-            if (cached == null) {
-                try {
-                    cached =
-                            Collections.unmodifiableMap(
-                                    new LinkedHashMap<>(
-                                            GlobalConfiguration.loadConfiguration().toMap()));
-                } catch (Throwable error) {
-                    LOGGER.debug("Unable to load Flink cluster configuration for lineage", error);
-                    cached = Collections.emptyMap();
-                }
+        return Holder.OPTIONS;
+    }
+
+    /** Defers the disk read to first use; class initialisation makes it happen exactly once. */
+    private static final class Holder {
+        static final Map<String, String> OPTIONS = read();
+
+        private static Map<String, String> read() {
+            try {
+                return Collections.unmodifiableMap(
+                        new LinkedHashMap<>(GlobalConfiguration.loadConfiguration().toMap()));
+            } catch (Throwable error) {
+                LOGGER.debug("Unable to load Flink cluster configuration for lineage", error);
+                return Collections.emptyMap();
             }
-            return cached;
         }
     }
 }

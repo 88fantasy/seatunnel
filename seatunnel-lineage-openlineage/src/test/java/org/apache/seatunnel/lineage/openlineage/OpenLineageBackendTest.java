@@ -50,6 +50,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.ServiceLoader;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
@@ -187,6 +188,87 @@ class OpenLineageBackendTest {
             if (server != null) {
                 server.stop(0);
             }
+            logger.removeAppender(appender);
+            logger.setLevel(originalLevel);
+            logger.setAdditive(originalAdditive);
+            appender.stop();
+        }
+    }
+
+    /**
+     * A rejected request answers with a status code, and that code is the one thing an operator
+     * needs to tell a bad credential from a receiver that is down. It reaches the log only if the
+     * failure's own message is logged.
+     */
+    @Test
+    void reportsWhyASendFailed() {
+        HttpServer server = null;
+        try {
+            server = HttpServer.create(new InetSocketAddress(0), 0);
+            server.createContext("/lineage", exchange -> respond(exchange, 500));
+            server.start();
+
+            Map<String, Object> options = new HashMap<>();
+            options.put(LineageConfig.ENABLED, true);
+            options.put(
+                    LineageConfig.URL,
+                    "http://127.0.0.1:" + server.getAddress().getPort() + "/lineage");
+            options.put(LineageConfig.RETRY_TIMES, 0);
+            LineageConfig config =
+                    LineageConfig.resolve(options, Collections.emptyMap(), Collections.emptyMap());
+
+            String logs =
+                    capturedWarnings(() -> new OpenLineageBackend().emit(config, minimalEvent()));
+
+            assertTrue(logs.contains("HTTP 500"), logs);
+        } catch (IOException e) {
+            throw new AssertionError("Unable to start test HTTP server", e);
+        } finally {
+            if (server != null) {
+                server.stop(0);
+            }
+        }
+    }
+
+    /**
+     * An endpoint that cannot be used fails the same way on every attempt, so retrying it only
+     * multiplies the backoff sleep by the retry count on every event the job reports.
+     */
+    @Test
+    void doesNotRetryAnEndpointThatCannotBeUsed() {
+        Map<String, Object> options = new HashMap<>();
+        options.put(LineageConfig.ENABLED, true);
+        options.put(LineageConfig.RETRY_TIMES, 5000);
+        LineageConfig config =
+                LineageConfig.resolve(options, Collections.emptyMap(), Collections.emptyMap());
+
+        long startedAt = System.nanoTime();
+        String logs = capturedWarnings(() -> new OpenLineageBackend().emit(config, minimalEvent()));
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+
+        // The retried path sleeps up to 100ms per attempt, so 5000 retries cannot fit in here.
+        assertTrue(
+                elapsedMs < 5000,
+                "a configuration error must not be retried, it took " + elapsedMs + "ms");
+        assertTrue(logs.contains(LineageConfig.URL), logs);
+    }
+
+    /** Runs the body with the backend's warnings captured, and returns them joined. */
+    private static String capturedWarnings(Runnable body) {
+        Logger logger = (Logger) LogManager.getLogger(OpenLineageBackend.class);
+        CapturingAppender appender = new CapturingAppender();
+        Level originalLevel = logger.getLevel();
+        boolean originalAdditive = logger.isAdditive();
+        logger.addAppender(appender);
+        logger.setLevel(Level.WARN);
+        logger.setAdditive(false);
+        appender.start();
+        try {
+            body.run();
+            return appender.getEvents().stream()
+                    .map(event -> event.getMessage().getFormattedMessage())
+                    .collect(Collectors.joining("\n"));
+        } finally {
             logger.removeAppender(appender);
             logger.setLevel(originalLevel);
             logger.setAdditive(originalAdditive);

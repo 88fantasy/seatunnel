@@ -82,20 +82,20 @@ public final class LineageConfig implements Serializable {
             throw new IllegalArgumentException(HEARTBEAT_MIN_INTERVAL_MS + " must not be negative");
         }
         this.enabled = enabled;
-        this.transport = requireText(transport, TRANSPORT);
+        this.transport = LineageValidation.requireText(transport, TRANSPORT);
         this.url = blankToNull(url);
-        this.namespace = requireText(namespace, NAMESPACE);
+        this.namespace = LineageValidation.requireText(namespace, NAMESPACE);
         this.authToken = blankToNull(authToken);
         this.timeoutMs = timeoutMs;
         this.retryTimes = retryTimes;
-        this.runFacet = requireText(runFacet, RUN_FACET);
+        this.runFacet = LineageValidation.requireText(runFacet, RUN_FACET);
         this.runProperties =
                 Collections.unmodifiableMap(
                         runProperties == null
                                 ? new LinkedHashMap<>()
                                 : new LinkedHashMap<>(runProperties));
         this.heartbeatMinIntervalMs = heartbeatMinIntervalMs;
-        this.producer = requireText(producer, PRODUCER);
+        this.producer = LineageValidation.requireText(producer, PRODUCER);
     }
 
     /** Returns the default configuration with lineage reporting disabled. */
@@ -132,19 +132,28 @@ public final class LineageConfig implements Serializable {
                 asNullableString(first(job, env, cluster, URL)),
                 asString(first(job, env, cluster, NAMESPACE), NAMESPACE, DEFAULT_NAMESPACE),
                 asToken(env, cluster),
-                asInt(first(job, env, cluster, TIMEOUT_MS), DEFAULT_TIMEOUT_MS),
-                asInt(first(job, env, cluster, RETRY_TIMES), DEFAULT_RETRY_TIMES),
+                asInt(first(job, env, cluster, TIMEOUT_MS), TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+                asInt(first(job, env, cluster, RETRY_TIMES), RETRY_TIMES, DEFAULT_RETRY_TIMES),
                 asString(first(job, env, cluster, RUN_FACET), RUN_FACET, DEFAULT_RUN_FACET),
                 resolveRunProperties(job, env, cluster),
                 asLong(
                         first(job, env, cluster, HEARTBEAT_MIN_INTERVAL_MS),
+                        HEARTBEAT_MIN_INTERVAL_MS,
                         DEFAULT_HEARTBEAT_MIN_INTERVAL_MS),
                 asString(first(job, env, cluster, PRODUCER), PRODUCER, defaultProducer()));
     }
 
-    /** Resolves lineage configuration using only cluster-level options and defaults. */
-    public static LineageConfig fromClusterConfig(Map<String, ?> clusterOptions) {
-        return resolve(Collections.emptyMap(), clusterOptions, Collections.emptyMap());
+    /**
+     * Resolves only the enabled flag, using the same precedence and key aliases as {@link
+     * #resolve}.
+     *
+     * <p>Callers on the submission path need this before a full resolution is possible, and must
+     * not answer it with their own lookup: a second implementation drifts from the alias rules here
+     * and then disagrees with the configuration the job actually runs with.
+     */
+    public static boolean isEnabled(
+            Map<String, ?> jobOptions, Map<String, ?> clusterOptions, Map<String, ?> environment) {
+        return asBoolean(first(jobOptions, environment, clusterOptions, ENABLED), false);
     }
 
     /** Rejects a token in job options because job configuration may be persisted or serialized. */
@@ -343,21 +352,45 @@ public final class LineageConfig implements Serializable {
                 : fallback;
     }
 
-    private static int asInt(Lookup value, int fallback) {
-        return value.present && value.value != null
-                ? Integer.parseInt(String.valueOf(value.value))
-                : fallback;
+    private static int asInt(Lookup value, String key, int fallback) {
+        if (!value.present || value.value == null) {
+            return fallback;
+        }
+        String text = String.valueOf(value.value);
+        try {
+            return Integer.parseInt(text.trim());
+        } catch (NumberFormatException error) {
+            throw notANumber(key, text);
+        }
     }
 
-    private static long asLong(Lookup value, long fallback) {
-        return value.present && value.value != null
-                ? Long.parseLong(String.valueOf(value.value))
-                : fallback;
+    private static long asLong(Lookup value, String key, long fallback) {
+        if (!value.present || value.value == null) {
+            return fallback;
+        }
+        String text = String.valueOf(value.value);
+        try {
+            return Long.parseLong(text.trim());
+        } catch (NumberFormatException error) {
+            throw notANumber(key, text);
+        }
+    }
+
+    /**
+     * Names the option a malformed number came from.
+     *
+     * <p>The bare {@code NumberFormatException} says only what the text was. Every caller here
+     * resolves several numeric options at once, and the engines re-resolve the configuration on
+     * every reported event, so an unnamed failure appears repeatedly in a log that never says which
+     * setting to correct.
+     */
+    private static IllegalArgumentException notANumber(String key, String value) {
+        return new IllegalArgumentException(key + " must be a number, but was \"" + value + "\"");
     }
 
     private static String asString(Lookup value, String key, String fallback) {
         return value.present && value.value != null
-                ? requireText(String.valueOf(value.value), key)
+                ? LineageValidation.requireText(String.valueOf(value.value), key)
                 : fallback;
     }
 
@@ -369,28 +402,27 @@ public final class LineageConfig implements Serializable {
 
     private static Map<String, Object> resolveRunProperties(
             Map<String, ?> job, Map<String, ?> environment, Map<String, ?> cluster) {
-        MapLookup lookup = runProperties(job, false);
-        if (lookup.present) {
-            return lookup.value;
+        Map<String, Object> properties = runProperties(job, false);
+        if (properties == null) {
+            properties = runProperties(environment, true);
         }
-        lookup = runProperties(environment, true);
-        if (lookup.present) {
-            return lookup.value;
+        if (properties == null) {
+            properties = runProperties(cluster, false);
         }
-        lookup = runProperties(cluster, false);
-        return lookup.present ? lookup.value : new LinkedHashMap<>();
+        return properties == null ? new LinkedHashMap<>() : properties;
     }
 
-    private static MapLookup runProperties(Map<String, ?> values, boolean environment) {
+    /** Returns the properties declared by one source, or null when it declares none. */
+    private static Map<String, Object> runProperties(Map<String, ?> values, boolean environment) {
         Lookup direct =
                 environment
                         ? findEnvironment(values, RUN_PROPERTIES)
                         : find(values, RUN_PROPERTIES);
         if (direct.present) {
-            return MapLookup.of(asMap(direct));
+            return asMap(direct);
         }
         Map<String, Object> prefixed = prefixedMap(values, RUN_PROPERTIES, environment);
-        return prefixed.isEmpty() ? MapLookup.absent() : MapLookup.of(prefixed);
+        return prefixed.isEmpty() ? null : prefixed;
     }
 
     private static Map<String, Object> asMap(Lookup value) {
@@ -467,36 +499,32 @@ public final class LineageConfig implements Serializable {
     private static List<String> splitMapEntries(String value) {
         List<String> entries = new ArrayList<>();
         int start = 0;
-        char quote = 0;
-        boolean escaped = false;
-        for (int i = 0; i < value.length(); i++) {
-            char current = value.charAt(i);
-            if (quote != 0) {
-                if (escaped) {
-                    escaped = false;
-                } else if (current == '\\') {
-                    escaped = true;
-                } else if (current == quote) {
-                    quote = 0;
-                }
-            } else if (current == '\'' || current == '"') {
-                quote = current;
-            } else if (current == ',') {
-                entries.add(value.substring(start, i).trim());
-                start = i + 1;
-            }
-        }
-        if (quote != 0 || escaped) {
-            throw malformedMap();
+        int comma;
+        while ((comma = nextUnquoted(value, start, ",")) >= 0) {
+            entries.add(value.substring(start, comma).trim());
+            start = comma + 1;
         }
         entries.add(value.substring(start).trim());
         return entries;
     }
 
     private static int findMapSeparator(String value) {
+        return nextUnquoted(value, 0, ":=");
+    }
+
+    /**
+     * Returns the index of the first character of {@code stops} at or after {@code from} that is
+     * not inside a quoted section, or -1 when the value ends first.
+     *
+     * <p>Entry splitting and key/value separation share this scan so that the quoting and escaping
+     * rules cannot drift apart between them.
+     *
+     * @throws IllegalArgumentException when the value ends inside a quote or a trailing escape
+     */
+    private static int nextUnquoted(String value, int from, String stops) {
         char quote = 0;
         boolean escaped = false;
-        for (int i = 0; i < value.length(); i++) {
+        for (int i = from; i < value.length(); i++) {
             char current = value.charAt(i);
             if (quote != 0) {
                 if (escaped) {
@@ -508,9 +536,12 @@ public final class LineageConfig implements Serializable {
                 }
             } else if (current == '\'' || current == '"') {
                 quote = current;
-            } else if (current == ':' || current == '=') {
+            } else if (stops.indexOf(current) >= 0) {
                 return i;
             }
+        }
+        if (quote != 0 || escaped) {
+            throw malformedMap();
         }
         return -1;
     }
@@ -555,13 +586,6 @@ public final class LineageConfig implements Serializable {
         return value == null || value.trim().isEmpty() ? null : value;
     }
 
-    private static String requireText(String value, String field) {
-        if (value == null || value.trim().isEmpty()) {
-            throw new IllegalArgumentException(field + " must not be blank");
-        }
-        return value;
-    }
-
     private static final class Lookup {
         private final boolean present;
         private final Object value;
@@ -577,24 +601,6 @@ public final class LineageConfig implements Serializable {
 
         private static Lookup absent() {
             return new Lookup(false, null);
-        }
-    }
-
-    private static final class MapLookup {
-        private final boolean present;
-        private final Map<String, Object> value;
-
-        private MapLookup(boolean present, Map<String, Object> value) {
-            this.present = present;
-            this.value = value;
-        }
-
-        private static MapLookup of(Map<String, Object> value) {
-            return new MapLookup(true, value);
-        }
-
-        private static MapLookup absent() {
-            return new MapLookup(false, Collections.emptyMap());
         }
     }
 }

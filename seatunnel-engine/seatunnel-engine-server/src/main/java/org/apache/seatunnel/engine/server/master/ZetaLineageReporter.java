@@ -35,8 +35,6 @@ import org.apache.seatunnel.lineage.LineageDataset;
 import org.apache.seatunnel.lineage.LineageEvent;
 import org.apache.seatunnel.lineage.LineageEventType;
 import org.apache.seatunnel.lineage.LineageOutputStatistics;
-import org.apache.seatunnel.lineage.LineageReporter;
-import org.apache.seatunnel.lineage.LineageReporterFactory;
 import org.apache.seatunnel.lineage.LineageRunIds;
 import org.apache.seatunnel.lineage.LineageRuntime;
 
@@ -61,7 +59,6 @@ import java.util.stream.Collectors;
 /** Builds Zeta lineage events from the restored logical DAG and job metrics. */
 public final class ZetaLineageReporter {
     private static final ILogger LOGGER = Logger.getLogger(ZetaLineageReporter.class);
-    private static final int JOB_HEARTBEAT_KEY = Integer.MIN_VALUE;
 
     private ZetaLineageReporter() {}
 
@@ -85,12 +82,11 @@ public final class ZetaLineageReporter {
             return;
         }
         LineageEventType eventType = eventType(status);
-        boolean includeStatistics = eventType == LineageEventType.COMPLETE;
-        List<LineageEvent> events = events(jobMaster, config, eventType, includeStatistics);
+        List<LineageEvent> events = events(jobMaster, config, eventType);
         if (events.isEmpty()) {
             return;
         }
-        jobMaster.submitLineageEmission(() -> emit(config, events, eventType));
+        jobMaster.submitLineageEmission(() -> emit(config, events));
     }
 
     /**
@@ -107,9 +103,8 @@ public final class ZetaLineageReporter {
      * heaviest possible reporting on the other.
      *
      * @param jobMaster job master that owns the pipeline
-     * @param pipelineId completed checkpoint pipeline identifier
      */
-    public static void reportHeartbeat(JobMaster jobMaster, int pipelineId) {
+    public static void reportHeartbeat(JobMaster jobMaster) {
         try {
             LineageConfig config = jobMaster.resolveLineageConfig();
             if (!config.enabled()
@@ -121,7 +116,7 @@ public final class ZetaLineageReporter {
                     != JobMode.STREAMING) {
                 return;
             }
-            if (!shouldReportHeartbeat(jobMaster, pipelineId, config.heartbeatMinIntervalMs())) {
+            if (!shouldReportHeartbeat(jobMaster, config.heartbeatMinIntervalMs())) {
                 return;
             }
             jobMaster.submitLineageEmission(
@@ -136,10 +131,7 @@ public final class ZetaLineageReporter {
                             if (jobMaster.getJobStatus().isEndState()) {
                                 return;
                             }
-                            emit(
-                                    config,
-                                    events(jobMaster, config, LineageEventType.RUNNING, true),
-                                    LineageEventType.RUNNING);
+                            emit(config, events(jobMaster, config, LineageEventType.RUNNING));
                         } catch (Throwable error) {
                             LOGGER.warning("Failed to emit Zeta lineage heartbeat", error);
                         }
@@ -149,12 +141,10 @@ public final class ZetaLineageReporter {
         }
     }
 
-    private static boolean shouldReportHeartbeat(
-            JobMaster jobMaster, int ignoredPipelineId, long minimumIntervalMs) {
-        Map<Integer, AtomicLong> heartbeatTimes = jobMaster.getLineageHeartbeatTimes();
-        // Checkpoint callbacks carry a pipeline id, but lineage heartbeat expiry is job-wide.
-        AtomicLong lastTime =
-                heartbeatTimes.computeIfAbsent(JOB_HEARTBEAT_KEY, ignored -> new AtomicLong());
+    private static boolean shouldReportHeartbeat(JobMaster jobMaster, long minimumIntervalMs) {
+        // Checkpoint callbacks are per pipeline, but lineage heartbeat expiry is job-wide, so a
+        // single timestamp covers every pipeline of the job.
+        AtomicLong lastTime = jobMaster.getLineageHeartbeatTime();
         long now = System.currentTimeMillis();
         while (true) {
             long previous = lastTime.get();
@@ -168,15 +158,17 @@ public final class ZetaLineageReporter {
     }
 
     private static List<LineageEvent> events(
-            JobMaster jobMaster,
-            LineageConfig config,
-            LineageEventType eventType,
-            boolean includeStatistics) {
+            JobMaster jobMaster, LineageConfig config, LineageEventType eventType) {
         LogicalDag logicalDag = jobMaster.getLogicalDag();
         if (logicalDag == null) {
             return Collections.emptyList();
         }
+        // Only a run that is still producing, or one that finished, carries meaningful counts: an
+        // aborted or failed run's metrics describe work that was rolled back.
+        boolean includeStatistics =
+                eventType == LineageEventType.COMPLETE || eventType == LineageEventType.RUNNING;
         JobMetrics metrics = includeStatistics ? outputMetrics(jobMaster, eventType) : null;
+        Map<Long, List<Long>> upstreamsByVertex = upstreamIndex(logicalDag);
         List<LineageEvent> events = new ArrayList<>();
         int sinkCount = 0;
         for (LogicalVertex vertex : logicalDag.getLogicalVertexMap().values()) {
@@ -186,16 +178,17 @@ public final class ZetaLineageReporter {
             }
             SinkAction<?, ?, ?, ?> sinkAction = (SinkAction<?, ?, ?, ?>) action;
             sinkCount++;
-            List<LineageDataset> inputs = sourceDatasets(logicalDag, vertex.getVertexId());
+            List<LineageDataset> inputs =
+                    sourceDatasets(logicalDag, upstreamsByVertex, vertex.getVertexId());
             List<LineageDataset> outputs = sinkDatasets(sinkAction);
+            LineageOutputStatistics statistics =
+                    includeStatistics
+                            ? outputStatistics(metrics, sinkAction, outputs.size())
+                            : null;
             for (LineageDataset output : outputs) {
                 LineageDataset eventOutput = output;
-                if (includeStatistics && eventType != LineageEventType.FAIL) {
-                    LineageOutputStatistics statistics =
-                            outputStatistics(metrics, sinkAction, outputs.size());
-                    if (statistics != null) {
-                        eventOutput = output.withOutputStatistics(statistics);
-                    }
+                if (statistics != null) {
+                    eventOutput = output.withOutputStatistics(statistics);
                 }
                 Map<String, Object> properties = new HashMap<>(config.runProperties());
                 properties.put("engine", "zeta");
@@ -240,23 +233,10 @@ public final class ZetaLineageReporter {
         return events;
     }
 
-    private static void emit(
-            LineageConfig config, List<LineageEvent> events, LineageEventType eventType) {
-        if (events.isEmpty()) {
-            return;
-        }
+    private static void emit(LineageConfig config, List<LineageEvent> events) {
         try {
-            LineageReporter reporter = LineageReporterFactory.create(config);
             for (LineageEvent event : events) {
-                if (eventType == LineageEventType.START) {
-                    reporter.start(event);
-                } else if (eventType == LineageEventType.RUNNING) {
-                    reporter.heartbeat(event);
-                } else if (eventType == LineageEventType.COMPLETE) {
-                    reporter.complete(event);
-                } else {
-                    LineageRuntime.emit(config, event);
-                }
+                LineageRuntime.emit(config, event);
             }
         } catch (Throwable error) {
             LOGGER.warning("Failed to emit Zeta lineage event", error);
@@ -280,6 +260,20 @@ public final class ZetaLineageReporter {
         }
     }
 
+    /** Indexes the DAG edges by target vertex so a backwards walk does not rescan them. */
+    private static Map<Long, List<Long>> upstreamIndex(LogicalDag logicalDag) {
+        Map<Long, List<Long>> upstreamsByVertex = new HashMap<>();
+        for (LogicalEdge edge : logicalDag.getEdges()) {
+            if (edge.getTargetVertexId() == null || edge.getInputVertexId() == null) {
+                continue;
+            }
+            upstreamsByVertex
+                    .computeIfAbsent(edge.getTargetVertexId(), ignored -> new ArrayList<>())
+                    .add(edge.getInputVertexId());
+        }
+        return upstreamsByVertex;
+    }
+
     /**
      * Walks the logical DAG backwards from a sink vertex and collects the datasets of every source
      * reachable from it.
@@ -292,23 +286,15 @@ public final class ZetaLineageReporter {
      * IDs rather than vertex objects to avoid a serialization cycle.
      *
      * @param logicalDag restored logical DAG
+     * @param upstreamsByVertex edge index built once per event set by {@link #upstreamIndex}
      * @param sinkVertexId vertex ID of the sink to walk back from
      * @return datasets of all reachable sources, without duplicates
      */
-    private static List<LineageDataset> sourceDatasets(LogicalDag logicalDag, Long sinkVertexId) {
+    private static List<LineageDataset> sourceDatasets(
+            LogicalDag logicalDag, Map<Long, List<Long>> upstreamsByVertex, Long sinkVertexId) {
         if (sinkVertexId == null) {
             return Collections.emptyList();
         }
-        Map<Long, List<Long>> upstreamsByVertex = new HashMap<>();
-        for (LogicalEdge edge : logicalDag.getEdges()) {
-            if (edge.getTargetVertexId() == null || edge.getInputVertexId() == null) {
-                continue;
-            }
-            upstreamsByVertex
-                    .computeIfAbsent(edge.getTargetVertexId(), ignored -> new ArrayList<>())
-                    .add(edge.getInputVertexId());
-        }
-
         Set<LineageDataset> datasets = new LinkedHashSet<>();
         Set<Long> visited = new HashSet<>();
         Deque<Long> pending = new ArrayDeque<>();

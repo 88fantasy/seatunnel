@@ -17,15 +17,25 @@
 
 package org.apache.seatunnel.lineage;
 
-/** Small runtime bridge for emitting an event with its explicit lifecycle type. */
+/**
+ * The single seam through which every engine emits a lineage event.
+ *
+ * <p>The event carries its own {@link LineageEventType}, so there is deliberately no per-lifecycle
+ * method here: a reporter-style API would need one method per type and would still leave the caller
+ * to route the types it does not cover.
+ */
 public final class LineageRuntime {
     private LineageRuntime() {}
 
     /** Emits an event through the configured backend, or returns immediately when disabled. */
-    public static void emit(LineageConfig config, LineageEvent event) throws Exception {
+    public static void emit(LineageConfig config, LineageEvent event) {
         if (!config.enabled()) {
             return;
         }
-        LineageBackendLoader.load(config).emit(config, event);
+        try {
+            LineageBackendLoader.load(config).emit(config, event);
+        } catch (Exception e) {
+            throw new LineageReportingException(e);
+        }
     }
 }

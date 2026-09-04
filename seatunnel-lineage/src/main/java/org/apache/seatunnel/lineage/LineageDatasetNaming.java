@@ -38,48 +38,32 @@ public final class LineageDatasetNaming {
         if (isUnusable(catalogName) || isUnusable(database) || isUnusable(table)) {
             return Optional.empty();
         }
-        return table(database, table)
-                .map(value -> LineageDataset.of("paimon://" + catalogName + "/" + database, value));
+        return Optional.of(LineageDataset.of("paimon://" + catalogName + "/" + database, table));
     }
 
     /** Creates the Doris dataset identity using its query port rather than its HTTP port. */
     public static Optional<LineageDataset> doris(
             String feHost, int queryPort, String database, String table) {
-        if (isUnusable(feHost) || queryPort <= 0) {
-            return Optional.empty();
-        }
-        return table(database, table)
-                .map(
-                        value ->
-                                LineageDataset.of(
-                                        "mysql://" + feHost + ":" + queryPort,
-                                        database + "." + value));
+        return jdbc("mysql", feHost, queryPort, database, table);
     }
 
     /** Creates a JDBC dataset identity from the URL scheme, host, port, database, and table. */
     public static Optional<LineageDataset> jdbc(
             String scheme, String host, int port, String database, String table) {
-        if (isUnusable(scheme) || isUnusable(host) || port <= 0) {
+        if (isUnusable(scheme)
+                || isUnusable(host)
+                || port <= 0
+                || isUnusable(database)
+                || isUnusable(table)) {
             return Optional.empty();
         }
-        return table(database, table)
-                .map(
-                        value ->
-                                LineageDataset.of(
-                                        scheme + "://" + host + ":" + port,
-                                        database + "." + value));
+        return Optional.of(
+                LineageDataset.of(scheme + "://" + host + ":" + port, database + "." + table));
     }
 
     /** Returns whether a complete table path is the placeholder default path. */
     public static boolean isDefaultTablePath(String fullName) {
         return fullName != null && DEFAULT_TABLE_PATH.equals(fullName.trim());
-    }
-
-    private static Optional<String> table(String database, String table) {
-        if (isUnusable(database) || isUnusable(table)) {
-            return Optional.empty();
-        }
-        return Optional.of(table);
     }
 
     /**
