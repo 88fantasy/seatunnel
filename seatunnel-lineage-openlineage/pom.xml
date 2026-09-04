@@ -30,6 +30,7 @@
     <properties>
         <openlineage.version>1.29.0</openlineage.version>
         <httpclient.version>4.5.13</httpclient.version>
+        <httpcore.version>4.4.16</httpcore.version>
     </properties>
 
     <dependencies>
@@ -65,6 +66,13 @@
             <groupId>org.apache.httpcomponents</groupId>
             <artifactId>httpclient</artifactId>
             <version>${httpclient.version}</version>
+        </dependency>
+        <!-- Declared so that this module resolves the same httpcore the rest of the
+             distribution already ships, instead of the older one httpclient depends on. -->
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpcore</artifactId>
+            <version>${httpcore.version}</version>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
