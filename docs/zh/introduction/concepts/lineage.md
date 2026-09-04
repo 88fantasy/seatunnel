@@ -101,3 +101,41 @@ Paimon 数据集。Doris 的 `fenodes` 通常是 HTTP Stream Load
 
 除 `openlineage_run_properties` 配置的属性外，run facet 还会携带 `engine` 属性，标明上报该 run
 的执行引擎。各引擎还会补充能在自己 UI 中定位该 run 的标识，见下面各引擎章节。
+
+## Zeta
+
+### Zeta 集群配置
+
+Zeta 从 `seatunnel.yaml` 读取集群级配置：
+
+```yaml
+seatunnel:
+  engine:
+    openlineage:
+      enabled: true
+      transport: http
+      url: http://lineage.example/api/lineage
+      namespace: seatunnel
+      timeout_ms: 10000
+      retry_times: 3
+      run_facet: seatunnel_properties
+      heartbeat_min_interval_ms: 3600000
+      producer: https://seatunnel.apache.org/<version>
+```
+
+集群级 `auth_token` 也受支持，但应通过集群的 secret 管理机制提供，不要复制到作业 `env` 块。
+
+### Zeta 上报的事件
+
+Zeta 在作业进入 `RUNNING` 时发射 `START`，并在终态发射对应的 `COMPLETE`、`ABORT` 或 `FAIL`。
+`SAVEPOINT_DONE` 映射为 `COMPLETE`，`UNKNOWABLE` 映射为 `FAIL`。run facet 除 `engine` 外还携带
+`sink_action` 属性。
+
+Zeta 从历史作业指标读取终态输出统计，优先使用 committed 计数；没有正的 committed 计数时回退到
+attempted 写入计数。事件中会记录实际采用的是哪一种口径，因此消费方不会把 attempted 行数误认为
+committed 行数。
+
+未结束的作业会周期性发送心跳事件，使接收端不会把仍在运行的作业误判为 producer 已死。Zeta 搭在
+checkpoint 完成回调上发送，因此关闭 checkpoint 的 Zeta 作业没有心跳。心跳受
+`openlineage_heartbeat_min_interval_ms` 节流，设置为 `0` 时不再发送。确实停止上报的 run 受接收端
+abandoned-run 超时约束，该推断状态会被之后到达的终态事件覆盖。

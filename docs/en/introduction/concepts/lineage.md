@@ -110,3 +110,45 @@ Besides the properties configured through `openlineage_run_properties`, the run 
 `engine` property naming the execution engine that reported the run. Each engine adds the
 identifiers that make its run findable in that engine's own UI; those are described in the engine
 sections below.
+
+## Zeta
+
+### Zeta cluster configuration
+
+Zeta reads cluster-level values from `seatunnel.yaml`:
+
+```yaml
+seatunnel:
+  engine:
+    openlineage:
+      enabled: true
+      transport: http
+      url: http://lineage.example/api/lineage
+      namespace: seatunnel
+      timeout_ms: 10000
+      retry_times: 3
+      run_facet: seatunnel_properties
+      heartbeat_min_interval_ms: 3600000
+      producer: https://seatunnel.apache.org/<version>
+```
+
+The cluster-level `auth_token` value is supported, but should be supplied through the cluster's
+secret-management mechanism. It must not be copied into a job `env` block.
+
+### Events reported by Zeta
+
+Zeta emits `START` when a job enters `RUNNING`, then emits `COMPLETE`, `ABORT`, or `FAIL` for the
+corresponding terminal state. `SAVEPOINT_DONE` is represented as `COMPLETE`, while `UNKNOWABLE` is
+represented as `FAIL`. The run facet carries a `sink_action` property in addition to `engine`.
+
+Zeta reads terminal output metrics from historical job metrics, preferring committed counters and
+falling back to attempted write counters when no positive committed counter is available. The event
+records which of the two was used, so a consumer is never told that attempted rows are committed
+ones.
+
+A job that has not finished reports periodic heartbeat events, so a receiver does not mistake a
+still-running job for one whose producer died. Zeta emits them from its checkpoint completion
+callback, so a Zeta job with checkpointing disabled has no heartbeat. They are throttled by
+`openlineage_heartbeat_min_interval_ms`, and setting it to `0` stops them. A run that does stop
+reporting is subject to the receiver's abandoned-run timeout, and the state inferred that way is
+replaced by a terminal event arriving later.
