@@ -26,6 +26,7 @@ The following options are available in a job `env` block unless noted otherwise.
 | `openlineage_run_properties` | Map | None | Custom properties copied to the run facet. |
 | `openlineage_heartbeat_min_interval_ms` | Long | `3600000` | Minimum interval between streaming-job heartbeat events, in milliseconds. `0` disables heartbeat reporting. |
 | `openlineage_producer` | String | `https://seatunnel.apache.org/<version>` | OpenLineage producer identifier. The default is derived from the running SeaTunnel version at runtime. |
+| `openlineage_job_name_per_output` | Boolean | `false` | Reports each output under its own job name, `<job name>::<output namespace>/<output name>`, instead of the shared job name. Enable it for a receiver that keeps one current run per job, where a job with several outputs would otherwise show only one of them. |
 
 Values are resolved independently with this precedence:
 
@@ -59,6 +60,7 @@ The environment variable name is the upper-case option name:
 | `openlineage_run_properties` | `OPENLINEAGE_RUN_PROPERTIES` |
 | `openlineage_heartbeat_min_interval_ms` | `OPENLINEAGE_HEARTBEAT_MIN_INTERVAL_MS` |
 | `openlineage_producer` | `OPENLINEAGE_PRODUCER` |
+| `openlineage_job_name_per_output` | `OPENLINEAGE_JOB_NAME_PER_OUTPUT` |
 
 For example, set `OPENLINEAGE_URL` and `OPENLINEAGE_AUTH_TOKEN` through the process or service
 manager environment. Do not put a real token in a job file, repository file, command history, or

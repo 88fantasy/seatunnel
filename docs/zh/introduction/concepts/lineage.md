@@ -24,6 +24,7 @@ SeaTunnel 可以向任意兼容 OpenLineage 的接收端发射表级 `RunEvent` 
 | `openlineage_run_properties` | Map | 无 | 写入 run facet 的自定义属性。 |
 | `openlineage_heartbeat_min_interval_ms` | Long | `3600000` | 流作业心跳的最小间隔，单位为毫秒。设置为 `0` 表示关闭心跳上报。 |
 | `openlineage_producer` | String | `https://seatunnel.apache.org/<version>` | OpenLineage producer 标识。默认值在运行时根据当前 SeaTunnel 版本生成。 |
+| `openlineage_job_name_per_output` | Boolean | `false` | 每个输出使用独立的 job name `<job name>::<输出 namespace>/<输出 name>`，而不是共用作业名。接收端对每个 job 只保留一个当前 run 时，多输出作业否则只会显示其中一个输出。 |
 
 每个配置项独立按照以下优先级解析：
 
@@ -55,6 +56,7 @@ Flink JobGraph。
 | `openlineage_run_properties` | `OPENLINEAGE_RUN_PROPERTIES` |
 | `openlineage_heartbeat_min_interval_ms` | `OPENLINEAGE_HEARTBEAT_MIN_INTERVAL_MS` |
 | `openlineage_producer` | `OPENLINEAGE_PRODUCER` |
+| `openlineage_job_name_per_output` | `OPENLINEAGE_JOB_NAME_PER_OUTPUT` |
 
 例如，可以通过进程环境或服务管理器注入 `OPENLINEAGE_URL` 和 `OPENLINEAGE_AUTH_TOKEN`。不要把真实
 token 写入作业文件、仓库文件、命令历史或日志。
