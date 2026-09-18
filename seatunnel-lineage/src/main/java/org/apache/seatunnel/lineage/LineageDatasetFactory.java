@@ -103,7 +103,7 @@ public final class LineageDatasetFactory {
     }
 
     private static List<LineageDataset> jdbc(Map<String, ?> options) {
-        String url = string(options, "url", "jdbc_url", "jdbc-url");
+        String url = string(options, "url", "base-url", "jdbc_url", "jdbc-url");
         if (url == null || !url.startsWith("jdbc:")) {
             return Collections.emptyList();
         }
@@ -145,7 +145,7 @@ public final class LineageDatasetFactory {
     }
 
     private static boolean isJdbc(String pluginName, Map<String, ?> options) {
-        return string(options, "url", "jdbc_url", "jdbc-url") != null
+        return string(options, "url", "base-url", "jdbc_url", "jdbc-url") != null
                 || pluginName.toLowerCase().contains("jdbc")
                 || pluginName.equalsIgnoreCase("mysql")
                 || pluginName.equalsIgnoreCase("postgresql")
@@ -159,6 +159,20 @@ public final class LineageDatasetFactory {
             for (Object value : (List<?>) tableList) {
                 if (value instanceof Map) {
                     result.add((Map<String, ?>) value);
+                }
+            }
+            if (!result.isEmpty()) {
+                return result;
+            }
+        }
+        // CDC sources list fully qualified names, e.g. table-names = ["db.table"]; database-names
+        // only narrows the binlog subscription and never qualifies these names.
+        Object tableNames = options.get("table-names");
+        if (tableNames instanceof List) {
+            List<Map<String, ?>> result = new ArrayList<>();
+            for (Object value : (List<?>) tableNames) {
+                if (value != null) {
+                    result.add(Collections.singletonMap("table_path", String.valueOf(value)));
                 }
             }
             if (!result.isEmpty()) {
