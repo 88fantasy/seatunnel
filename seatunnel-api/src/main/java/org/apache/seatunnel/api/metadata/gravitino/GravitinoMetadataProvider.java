@@ -51,6 +51,7 @@ import java.util.Optional;
  *   kind: gravitino
  *   uri: <a href="http://localhost:8090">...</a>          # Gravitino server URI
  *   metalake: seatunnel                 # Metalake name
+ *   auth-token: xxx                     # Optional bearer token (Gravitino OAuth)
  * </pre>
  *
  * <p>Gravitino response example:
@@ -124,6 +125,14 @@ public class GravitinoMetadataProvider implements MetadataProvider {
                     .noDefaultValue()
                     .withDescription("Gravitino metalake name to use for data source metadata");
 
+    public static final Option<String> AUTH_TOKEN =
+            Options.key("auth-token")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Optional bearer token sent as 'Authorization: Bearer <token>', "
+                                    + "required when the Gravitino server uses OAuth authentication");
+
     @Override
     public String kind() {
         return "gravitino";
@@ -147,7 +156,9 @@ public class GravitinoMetadataProvider implements MetadataProvider {
         }
         this.uri = uri;
         this.metalake = metalake;
-        this.client = new GravitinoClient();
+        String authToken =
+                config.hasPath(AUTH_TOKEN.key()) ? config.getString(AUTH_TOKEN.key()) : null;
+        this.client = new GravitinoClient(authToken);
         this.tableSchemaConvertor = new GravitinoTableSchemaConvertor();
     }
 

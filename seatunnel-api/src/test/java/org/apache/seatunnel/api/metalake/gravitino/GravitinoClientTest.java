@@ -24,11 +24,13 @@ import org.apache.seatunnel.api.table.catalog.TablePath;
 import org.apache.http.HttpEntity;
 import org.apache.http.StatusLine;
 import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpUriRequest;
 import org.apache.http.impl.client.CloseableHttpClient;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -68,6 +70,37 @@ public class GravitinoClientTest {
             Assertions.assertEquals("public", tablePath.getSchemaName());
             Assertions.assertEquals("users", tablePath.getTableName());
         }
+    }
+
+    // ========== Authorization Header Tests ==========
+
+    @Test
+    void testBearerTokenSentWhenConfigured() throws Exception {
+        HttpUriRequest request = executeAndCaptureRequest("secret-token");
+        Assertions.assertEquals(
+                "Bearer secret-token", request.getFirstHeader("Authorization").getValue());
+        Assertions.assertEquals(1, request.getHeaders("Authorization").length);
+        Assertions.assertEquals(
+                "application/vnd.gravitino.v1+json", request.getFirstHeader("Accept").getValue());
+    }
+
+    @Test
+    void testNoAuthorizationHeaderWithoutToken() throws Exception {
+        Assertions.assertNull(executeAndCaptureRequest(null).getFirstHeader("Authorization"));
+        Assertions.assertNull(executeAndCaptureRequest("").getFirstHeader("Authorization"));
+    }
+
+    private HttpUriRequest executeAndCaptureRequest(String authToken) throws IOException {
+        CloseableHttpClient httpClient = org.mockito.Mockito.mock(CloseableHttpClient.class);
+        CloseableHttpResponse response =
+                createMockResponse(200, "{\"table\":{\"name\":\"test_table\"}}");
+        when(httpClient.execute(any())).thenReturn(response);
+        try (GravitinoClient client = new GravitinoClient(httpClient, authToken)) {
+            client.getTableSchema(TEST_URL);
+        }
+        ArgumentCaptor<HttpUriRequest> captor = ArgumentCaptor.forClass(HttpUriRequest.class);
+        verify(httpClient).execute(captor.capture());
+        return captor.getValue();
     }
 
     @Test

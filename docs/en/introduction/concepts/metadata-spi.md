@@ -188,6 +188,7 @@ seatunnel:
 | `kind`               | String  | `gravitino` | The Metadata provider type to use                      |
 | `gravitino.uri`      | String  | -           | Gravitino server URI (required when kind=gravitino)    |
 | `gravitino.metalake` | String  | -           | Gravitino metalake name (required when kind=gravitino) |
+| `gravitino.auth-token` | String | - | Optional bearer token sent as `Authorization: Bearer <token>`; required when the Gravitino server uses OAuth authentication |
 
 ## Default Implementation: Gravitino
 

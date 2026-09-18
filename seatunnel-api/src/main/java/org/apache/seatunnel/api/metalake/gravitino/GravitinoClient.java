@@ -47,6 +47,7 @@ import static org.apache.seatunnel.api.table.schema.exception.SchemaEvolutionErr
 public class GravitinoClient implements MetalakeClient {
 
     private static final String HEADER_ACCEPT = "Accept";
+    private static final String HEADER_AUTHORIZATION = "Authorization";
     private static final String MEDIA_TYPE_GRAVITINO_V1 = "application/vnd.gravitino.v1+json";
     private static final String JSON_FIELD_CATALOG = "catalog";
     private static final String JSON_FIELD_TABLE = "table";
@@ -59,8 +60,17 @@ public class GravitinoClient implements MetalakeClient {
             Pattern.compile("/catalogs/([^/]+)/schemas/([^/]+)/tables/([^/]+)");
 
     private final CloseableHttpClient httpClient;
+    private final String authToken;
 
     public GravitinoClient() {
+        this((String) null);
+    }
+
+    /**
+     * @param authToken bearer token sent as {@code Authorization: Bearer <token>}; null or empty
+     *     sends no authorization header
+     */
+    public GravitinoClient(String authToken) {
         RequestConfig config =
                 RequestConfig.custom()
                         .setConnectTimeout(5000)
@@ -74,11 +84,18 @@ public class GravitinoClient implements MetalakeClient {
                         .setMaxConnTotal(50)
                         .setMaxConnPerRoute(20)
                         .build();
+        this.authToken = authToken;
     }
 
     @VisibleForTesting
     protected GravitinoClient(CloseableHttpClient httpClient) {
+        this(httpClient, null);
+    }
+
+    @VisibleForTesting
+    protected GravitinoClient(CloseableHttpClient httpClient, String authToken) {
         this.httpClient = httpClient;
+        this.authToken = authToken;
     }
 
     @Override
@@ -134,6 +151,9 @@ public class GravitinoClient implements MetalakeClient {
         for (int attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
             HttpGet request = new HttpGet(url);
             request.addHeader(HEADER_ACCEPT, MEDIA_TYPE_GRAVITINO_V1);
+            if (authToken != null && !authToken.isEmpty()) {
+                request.addHeader(HEADER_AUTHORIZATION, "Bearer " + authToken);
+            }
             try (CloseableHttpResponse response = httpClient.execute(request)) {
                 final int statusCode = response.getStatusLine().getStatusCode();
                 if (statusCode != HttpStatus.SC_OK) {

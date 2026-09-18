@@ -187,6 +187,7 @@ seatunnel:
 | `kind`               | String  | `gravitino` | 要使用的元数据提供者类型                                |
 | `gravitino.uri`      | String  | -           | Gravitino 服务器 URI（当 kind=gravitino 时必填）     |
 | `gravitino.metalake` | String  | -           | Gravitino metalake 名称（当 kind=gravitino 时必填） |
+| `gravitino.auth-token` | String | - | 可选，以 `Authorization: Bearer <token>` 请求头发送的令牌；Gravitino 服务端开启 OAuth 认证时必填 |
 
 ## 默认实现：Gravitino
 
