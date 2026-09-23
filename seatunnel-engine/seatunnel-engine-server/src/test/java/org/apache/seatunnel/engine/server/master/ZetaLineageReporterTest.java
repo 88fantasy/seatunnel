@@ -34,6 +34,7 @@ import org.apache.seatunnel.engine.core.job.JobImmutableInformation;
 import org.apache.seatunnel.engine.core.job.RestoreMode;
 import org.apache.seatunnel.lineage.LineageConfig;
 import org.apache.seatunnel.lineage.LineageDataset;
+import org.apache.seatunnel.lineage.LineageEvent;
 import org.apache.seatunnel.lineage.LineageEventType;
 
 import org.junit.jupiter.api.Assertions;
@@ -350,6 +351,89 @@ class ZetaLineageReporterTest {
                 Collections.emptyList(),
                 invokeSourceDatasets(dag, null),
                 "a missing vertex id yields no inputs rather than failing");
+    }
+
+    /**
+     * A job whose two sources each feed their own sink reports one run per output. A receiver that
+     * keeps one current run per job name loses all but one of them unless the outputs are told
+     * apart, so the per-output name is opt-in and the default must leave the job name untouched.
+     */
+    @Test
+    void shouldNameTheJobPerOutputOnlyWhenConfigured() throws Exception {
+        JobMaster jobMaster = twoOutputJobMaster("orders_sync");
+
+        Assertions.assertEquals(
+                Arrays.asList("orders_sync", "orders_sync"),
+                jobNames(jobMaster, Collections.emptyMap()));
+
+        Map<String, Object> options = new HashMap<>();
+        options.put(LineageConfig.JOB_NAME_PER_OUTPUT, true);
+        Assertions.assertEquals(
+                Arrays.asList(
+                        "orders_sync::doris://fe:9030/ods.orders",
+                        "orders_sync::doris://fe:9030/ods.refunds"),
+                jobNames(jobMaster, options));
+    }
+
+    private static List<String> jobNames(JobMaster jobMaster, Map<String, Object> options)
+            throws Exception {
+        options = new HashMap<>(options);
+        options.put(LineageConfig.ENABLED, true);
+        LineageConfig config =
+                LineageConfig.resolve(options, Collections.emptyMap(), Collections.emptyMap());
+        Method method =
+                ZetaLineageReporter.class.getDeclaredMethod(
+                        "events", JobMaster.class, LineageConfig.class, LineageEventType.class);
+        method.setAccessible(true);
+        List<String> names = new ArrayList<>();
+        for (Object event :
+                (List<?>) method.invoke(null, jobMaster, config, LineageEventType.START)) {
+            names.add(((LineageEvent) event).jobName());
+        }
+        Collections.sort(names);
+        return names;
+    }
+
+    /** Two independent source-to-sink chains, each writing one Doris table. */
+    private static JobMaster twoOutputJobMaster(String jobName) {
+        LogicalDag dag = new LogicalDag();
+        String[][] chains = {{"ods_src.orders", "ods.orders"}, {"ods_src.refunds", "ods.refunds"}};
+        long vertexId = 1L;
+        for (String[] chain : chains) {
+            SourceAction<?, ?, ?> source =
+                    new SourceAction<>(
+                            vertexId,
+                            "source",
+                            mock(SeaTunnelSource.class),
+                            new HashSet<>(),
+                            new HashSet<>());
+            source.setLineageDatasets(
+                    Collections.singletonList(LineageDataset.of("mysql://db:3306", chain[0])));
+            SinkAction<?, ?, ?, ?> sink =
+                    new SinkAction<>(
+                            vertexId + 1,
+                            "sink",
+                            mock(SeaTunnelSink.class),
+                            new HashSet<>(),
+                            new HashSet<>());
+            sink.setLineageDatasets(
+                    Collections.singletonList(LineageDataset.of("doris://fe:9030", chain[1])));
+            dag.addLogicalVertex(new LogicalVertex(vertexId, source, 1));
+            dag.addLogicalVertex(new LogicalVertex(vertexId + 1, sink, 1));
+            dag.addEdge(new LogicalEdge(vertexId, vertexId + 1));
+            vertexId += 2;
+        }
+
+        JobConfig jobConfig = new JobConfig();
+        jobConfig.setName(jobName);
+        JobImmutableInformation information = mock(JobImmutableInformation.class);
+        doReturn(jobConfig).when(information).getJobConfig();
+        JobMaster jobMaster = mock(JobMaster.class);
+        doReturn(dag).when(jobMaster).getLogicalDag();
+        doReturn(information).when(jobMaster).getJobImmutableInformation();
+        doReturn(7L).when(jobMaster).getJobId();
+        doReturn("attempt").when(jobMaster).getLineageAttempt();
+        return jobMaster;
     }
 
     private static void clearUpstreams(Object action) throws Exception {

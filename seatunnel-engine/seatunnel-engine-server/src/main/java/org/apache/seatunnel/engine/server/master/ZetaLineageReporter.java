@@ -205,10 +205,13 @@ public final class ZetaLineageReporter {
                                 .eventType(eventType)
                                 .jobNamespace(config.namespace())
                                 .jobName(
-                                        jobMaster
-                                                .getJobImmutableInformation()
-                                                .getJobConfig()
-                                                .getName())
+                                        jobName(
+                                                config,
+                                                jobMaster
+                                                        .getJobImmutableInformation()
+                                                        .getJobConfig()
+                                                        .getName(),
+                                                output))
                                 .producer(config.producer())
                                 .runFacet(config.runFacet())
                                 .runProperties(properties)
@@ -231,6 +234,22 @@ public final class ZetaLineageReporter {
                             + " sink actions, none of which resolved to a supported dataset");
         }
         return events;
+    }
+
+    /**
+     * Returns the OpenLineage job name of the run reporting one output.
+     *
+     * <p>Every output is reported as its own run, and a receiver that keeps one current run per job
+     * then shows only the last one to arrive. With {@link LineageConfig#jobNamePerOutput()} each
+     * output gets a job of its own, named after the output in the OpenLineage {@code
+     * namespace/name} form. The suffix is applied to a single-output job too, so that adding a sink
+     * later does not rename the existing output's job.
+     */
+    static String jobName(LineageConfig config, String jobName, LineageDataset output) {
+        if (!config.jobNamePerOutput()) {
+            return jobName;
+        }
+        return jobName + "::" + output.namespace() + "/" + output.name();
     }
 
     private static void emit(LineageConfig config, List<LineageEvent> events) {
