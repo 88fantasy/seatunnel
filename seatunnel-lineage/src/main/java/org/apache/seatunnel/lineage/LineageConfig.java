@@ -146,7 +146,8 @@ public final class LineageConfig implements Serializable {
                         HEARTBEAT_MIN_INTERVAL_MS,
                         DEFAULT_HEARTBEAT_MIN_INTERVAL_MS),
                 asString(first(job, env, cluster, PRODUCER), PRODUCER, defaultProducer()),
-                asBoolean(first(job, env, cluster, JOB_NAME_PER_OUTPUT), false));
+                asBoolean(
+                        first(job, env, cluster, JOB_NAME_PER_OUTPUT), JOB_NAME_PER_OUTPUT, false));
     }
 
     /**

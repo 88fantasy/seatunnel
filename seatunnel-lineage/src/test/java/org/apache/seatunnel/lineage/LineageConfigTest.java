@@ -208,6 +208,29 @@ class LineageConfigTest {
      * silently folded into {@code false} the way {@link Boolean#parseBoolean} would.
      */
     @Test
+    void resolvesAndValidatesPerOutputJobNaming() {
+        assertFalse(LineageConfig.defaults().jobNamePerOutput());
+        LineageConfig config =
+                LineageConfig.resolve(
+                        Collections.singletonMap(LineageConfig.JOB_NAME_PER_OUTPUT, true),
+                        Collections.emptyMap(),
+                        Collections.emptyMap());
+        assertTrue(config.jobNamePerOutput());
+        assertEquals(true, config.toNonSensitiveMap().get(LineageConfig.JOB_NAME_PER_OUTPUT));
+
+        IllegalArgumentException failure =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () ->
+                                LineageConfig.resolve(
+                                        Collections.singletonMap(
+                                                LineageConfig.JOB_NAME_PER_OUTPUT, "tru"),
+                                        Collections.emptyMap(),
+                                        Collections.emptyMap()));
+        assertTrue(failure.getMessage().contains(LineageConfig.JOB_NAME_PER_OUTPUT));
+    }
+
+    @Test
     void namesTheEnabledOptionThatCouldNotBeParsed() {
         Map<String, Object> job = Collections.singletonMap(LineageConfig.ENABLED, "tru");
 
